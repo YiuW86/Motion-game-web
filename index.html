@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Motion Catch Game</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; height: 100%; background: #0d1117; color: #fff;
+    font-family: sans-serif; overflow: hidden;
+  }
+  #setup {
+    position: absolute; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 16px; z-index: 10;
+    background: #0d1117;
+  }
+  #setup input {
+    font-size: 2rem; text-align: center; letter-spacing: 6px; width: 220px;
+    padding: 10px; border-radius: 8px; border: none; text-transform: uppercase;
+  }
+  #setup button {
+    font-size: 1.2rem; padding: 10px 24px; border-radius: 8px; border: none;
+    background: #58a6ff; color: #001; cursor: pointer;
+  }
+  #hud {
+    position: absolute; top: 10px; left: 10px; font-size: 1.4rem; z-index: 5;
+  }
+  canvas { display: block; background: linear-gradient(#0d1117, #161b22); }
+</style>
+</head>
+<body>
+
+<div id="setup">
+  <h1>Motion Catch</h1>
+  <p>Enter the room code shown/typed on your phone app</p>
+  <input id="roomInput" maxlength="4" placeholder="CODE" />
+  <button id="connectBtn">Start Game</button>
+  <p id="status" style="opacity:0.7"></p>
+</div>
+
+<div id="hud" style="display:none">Score: <span id="score">0</span></div>
+<canvas id="game"></canvas>
+
+<script>
+const setupEl = document.getElementById("setup");
+const statusEl = document.getElementById("status");
+const hudEl = document.getElementById("hud");
+const scoreEl = document.getElementById("score");
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+
+function resize() {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+}
+window.addEventListener("resize", resize);
+resize();
+
+// !!! CHANGE THIS to your deployed relay server address (wss://...) !!!
+const SERVER_URL = "wss://motion-relay-server.onrender.com";
+
+let ws = null;
+let score = 0;
+let avatar = { x: 0.5, y: 0.5 }; // normalized 0..1 position, from phone
+let targets = [];
+let running = false;
+
+function connect(room) {
+  ws = new WebSocket(`${SERVER_URL}/?room=${encodeURIComponent(room)}&role=game`);
+
+  ws.onopen = () => { statusEl.textContent = "Connected. Waiting for phone..."; };
+
+  ws.onmessage = (event) => {
+    let msg;
+    try { msg = JSON.parse(event.data); } catch (e) { return; }
+
+    if (msg.type === "connected") {
+      statusEl.textContent = "Waiting for your phone to join room " + room;
+    }
+
+    if (msg.type === "pose" && msg.landmarks && msg.landmarks.nose) {
+      // Mirror horizontally so moving your body right moves the avatar right
+      // from the TV viewer's perspective (like a mirror).
+      avatar.x = 1 - msg.landmarks.nose.x;
+      avatar.y = msg.landmarks.nose.y;
+      if (!running) startGame();
+    }
+  };
+
+  ws.onclose = () => { statusEl.textContent = "Disconnected. Refresh to retry."; };
+  ws.onerror = () => { statusEl.textContent = "Connection error."; };
+}
+
+document.getElementById("connectBtn").onclick = () => {
+  const room = document.getElementById("roomInput").value.trim().toUpperCase();
+  if (!room) return;
+  statusEl.textContent = "Connecting...";
+  connect(room);
+};
+
+function startGame() {
+  running = true;
+  setupEl.style.display = "none";
+  hudEl.style.display = "block";
+  spawnTarget();
+  requestAnimationFrame(loop);
+}
+
+function spawnTarget() {
+  targets.push({
+    x: Math.random(),
+    y: -0.05,
+    speed: 0.0025 + Math.random() * 0.0025,
+  });
+}
+
+function loop() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  // draw avatar (controlled by phone)
+  const ax = avatar.x * canvas.width;
+  const ay = avatar.y * canvas.height;
+  ctx.beginPath();
+  ctx.arc(ax, ay, 30, 0, Math.PI * 2);
+  ctx.fillStyle = "#58a6ff";
+  ctx.fill();
+
+  // update + draw falling targets, check collision with avatar
+  for (let i = targets.length - 1; i >= 0; i--) {
+    const t = targets[i];
+    t.y += t.speed;
+
+    const tx = t.x * canvas.width;
+    const ty = t.y * canvas.height;
+    ctx.beginPath();
+    ctx.arc(tx, ty, 16, 0, Math.PI * 2);
+    ctx.fillStyle = "#f1c40f";
+    ctx.fill();
+
+    const dist = Math.hypot(tx - ax, ty - ay);
+    if (dist < 40) {
+      score++;
+      scoreEl.textContent = score;
+      targets.splice(i, 1);
+      spawnTarget();
+    } else if (t.y > 1.1) {
+      targets.splice(i, 1);
+      spawnTarget();
+    }
+  }
+
+  requestAnimationFrame(loop);
+}
+</script>
+</body>
+</html>
