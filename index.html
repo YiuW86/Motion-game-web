@@ -22,8 +22,13 @@
     font-size: 1.2rem; padding: 10px 24px; border-radius: 8px; border: none;
     background: #58a6ff; color: #001; cursor: pointer;
   }
+  #setup button:disabled { background: #444; color: #999; cursor: not-allowed; }
   #hud {
     position: absolute; top: 10px; left: 10px; font-size: 1.4rem; z-index: 5;
+  }
+  #calibrationLabel {
+    position: absolute; top: 10px; width: 100%; text-align: center;
+    font-size: 1.3rem; z-index: 5;
   }
   canvas { display: block; background: linear-gradient(#0d1117, #161b22); }
 </style>
@@ -34,10 +39,14 @@
   <h1>Motion Catch</h1>
   <p>Enter the room code shown/typed on your phone app</p>
   <input id="roomInput" maxlength="4" placeholder="CODE" />
-  <button id="connectBtn">Start Game</button>
+  <button id="connectBtn">Connect</button>
   <p id="status" style="opacity:0.7"></p>
 </div>
 
+<div id="calibrationLabel" style="display:none">
+  Move around and check the dots track you correctly, then press
+  <b>Enter</b> (or tap the screen) to start the game.
+</div>
 <div id="hud" style="display:none">Score: <span id="score">0</span></div>
 <canvas id="game"></canvas>
 
@@ -45,6 +54,7 @@
 const setupEl = document.getElementById("setup");
 const statusEl = document.getElementById("status");
 const hudEl = document.getElementById("hud");
+const calibrationLabelEl = document.getElementById("calibrationLabel");
 const scoreEl = document.getElementById("score");
 const canvas = document.getElementById("game");
 const ctx = canvas.getContext("2d");
@@ -61,9 +71,17 @@ const SERVER_URL = "wss://motion-relay-server.onrender.com";
 
 let ws = null;
 let score = 0;
-let avatar = { x: 0.5, y: 0.5 }; // normalized 0..1 position, from phone
+
+// Latest tracked points, normalized 0..1. Updated every time a pose
+// message arrives from the phone.
+let tracked = {
+  nose: null,
+  leftWrist: null,
+  rightWrist: null,
+};
+
+let mode = "waiting";   // "waiting" -> "calibration" -> "playing"
 let targets = [];
-let running = false;
 
 function connect(room) {
   ws = new WebSocket(`${SERVER_URL}/?room=${encodeURIComponent(room)}&role=game`);
@@ -78,12 +96,22 @@ function connect(room) {
       statusEl.textContent = "Waiting for your phone to join room " + room;
     }
 
-    if (msg.type === "pose" && msg.landmarks && msg.landmarks.nose) {
-      // Mirror horizontally so moving your body right moves the avatar right
-      // from the TV viewer's perspective (like a mirror).
-      avatar.x = 1 - msg.landmarks.nose.x;
-      avatar.y = msg.landmarks.nose.y;
-      if (!running) startGame();
+    if (msg.type === "pose" && msg.landmarks) {
+      // Mirror horizontally so moving right on your body moves right on
+      // screen too, like looking in a mirror.
+      if (msg.landmarks.nose) {
+        tracked.nose = { x: 1 - msg.landmarks.nose.x, y: msg.landmarks.nose.y };
+      }
+      if (msg.landmarks.leftWrist) {
+        tracked.leftWrist = { x: 1 - msg.landmarks.leftWrist.x, y: msg.landmarks.leftWrist.y };
+      }
+      if (msg.landmarks.rightWrist) {
+        tracked.rightWrist = { x: 1 - msg.landmarks.rightWrist.x, y: msg.landmarks.rightWrist.y };
+      }
+
+      if (mode === "waiting") {
+        enterCalibration();
+      }
     }
   };
 
@@ -98,13 +126,25 @@ document.getElementById("connectBtn").onclick = () => {
   connect(room);
 };
 
-function startGame() {
-  running = true;
+function enterCalibration() {
+  mode = "calibration";
   setupEl.style.display = "none";
-  hudEl.style.display = "block";
-  spawnTarget();
+  calibrationLabelEl.style.display = "block";
   requestAnimationFrame(loop);
 }
+
+function startGame() {
+  if (mode !== "calibration") return;
+  mode = "playing";
+  calibrationLabelEl.style.display = "none";
+  hudEl.style.display = "block";
+  spawnTarget();
+}
+
+// Let the person press Enter, or tap/click anywhere, to move from
+// calibration into the actual game once they're happy with the tracking.
+window.addEventListener("keydown", (e) => { if (e.key === "Enter") startGame(); });
+window.addEventListener("click", startGame);
 
 function spawnTarget() {
   targets.push({
@@ -114,42 +154,63 @@ function spawnTarget() {
   });
 }
 
+function drawTrackedPoint(point, color, label) {
+  if (!point) return;
+  const x = point.x * canvas.width;
+  const y = point.y * canvas.height;
+  ctx.beginPath();
+  ctx.arc(x, y, 26, 0, Math.PI * 2);
+  ctx.fillStyle = color;
+  ctx.fill();
+  ctx.font = "16px sans-serif";
+  ctx.fillStyle = "#fff";
+  ctx.textAlign = "center";
+  ctx.fillText(label, x, y - 36);
+  return { x, y };
+}
+
 function loop() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-  // draw avatar (controlled by phone)
-  const ax = avatar.x * canvas.width;
-  const ay = avatar.y * canvas.height;
-  ctx.beginPath();
-  ctx.arc(ax, ay, 30, 0, Math.PI * 2);
-  ctx.fillStyle = "#58a6ff";
-  ctx.fill();
-
-  // update + draw falling targets, check collision with avatar
-  for (let i = targets.length - 1; i >= 0; i--) {
-    const t = targets[i];
-    t.y += t.speed;
-
-    const tx = t.x * canvas.width;
-    const ty = t.y * canvas.height;
-    ctx.beginPath();
-    ctx.arc(tx, ty, 16, 0, Math.PI * 2);
-    ctx.fillStyle = "#f1c40f";
-    ctx.fill();
-
-    const dist = Math.hypot(tx - ax, ty - ay);
-    if (dist < 40) {
-      score++;
-      scoreEl.textContent = score;
-      targets.splice(i, 1);
-      spawnTarget();
-    } else if (t.y > 1.1) {
-      targets.splice(i, 1);
-      spawnTarget();
-    }
+  if (mode === "calibration") {
+    // Show all three tracked points clearly labeled, so it's obvious
+    // on the TV exactly what is and isn't being detected right now.
+    drawTrackedPoint(tracked.nose, "#58a6ff", "Head");
+    drawTrackedPoint(tracked.leftWrist, "#2ecc71", "Left hand");
+    drawTrackedPoint(tracked.rightWrist, "#e67e22", "Right hand");
+    requestAnimationFrame(loop);
+    return;
   }
 
-  requestAnimationFrame(loop);
+  if (mode === "playing") {
+    const avatar = drawTrackedPoint(tracked.nose, "#58a6ff", "");
+    if (!avatar) { requestAnimationFrame(loop); return; }
+
+    for (let i = targets.length - 1; i >= 0; i--) {
+      const t = targets[i];
+      t.y += t.speed;
+
+      const tx = t.x * canvas.width;
+      const ty = t.y * canvas.height;
+      ctx.beginPath();
+      ctx.arc(tx, ty, 16, 0, Math.PI * 2);
+      ctx.fillStyle = "#f1c40f";
+      ctx.fill();
+
+      const dist = Math.hypot(tx - avatar.x, ty - avatar.y);
+      if (dist < 40) {
+        score++;
+        scoreEl.textContent = score;
+        targets.splice(i, 1);
+        spawnTarget();
+      } else if (t.y > 1.1) {
+        targets.splice(i, 1);
+        spawnTarget();
+      }
+    }
+
+    requestAnimationFrame(loop);
+  }
 }
 </script>
 </body>
