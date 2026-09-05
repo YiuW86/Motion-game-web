@@ -72,13 +72,36 @@ const SERVER_URL = "wss://motion-relay-server.onrender.com";
 let ws = null;
 let score = 0;
 
-// Latest tracked points, normalized 0..1. Updated every time a pose
-// message arrives from the phone.
+// Latest tracked points, normalized 0..1, as received from the phone
+// (updates in bursts, roughly 15 times per second).
 let tracked = {
   nose: null,
   leftWrist: null,
   rightWrist: null,
 };
+
+// The points actually drawn on screen. These glide smoothly toward
+// "tracked" every animation frame (60 times per second) instead of jumping
+// straight to each new reading, which makes motion look far smoother even
+// though the underlying data arrives less often.
+let displayed = {
+  nose: null,
+  leftWrist: null,
+  rightWrist: null,
+};
+
+// How much of the remaining distance to close each frame. Higher = snappier
+// but more jittery, lower = smoother but slightly more "floaty" feeling.
+const DISPLAY_LERP = 0.35;
+
+function approach(current, target) {
+  if (!target) return current;
+  if (!current) return { x: target.x, y: target.y };
+  return {
+    x: current.x + (target.x - current.x) * DISPLAY_LERP,
+    y: current.y + (target.y - current.y) * DISPLAY_LERP,
+  };
+}
 
 let mode = "waiting";   // "waiting" -> "calibration" -> "playing"
 let targets = [];
@@ -172,18 +195,24 @@ function drawTrackedPoint(point, color, label) {
 function loop() {
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
+  // Smoothly glide the displayed points toward wherever the latest data
+  // says they should be, every frame, regardless of game mode.
+  displayed.nose = approach(displayed.nose, tracked.nose);
+  displayed.leftWrist = approach(displayed.leftWrist, tracked.leftWrist);
+  displayed.rightWrist = approach(displayed.rightWrist, tracked.rightWrist);
+
   if (mode === "calibration") {
     // Show all three tracked points clearly labeled, so it's obvious
     // on the TV exactly what is and isn't being detected right now.
-    drawTrackedPoint(tracked.nose, "#58a6ff", "Head");
-    drawTrackedPoint(tracked.leftWrist, "#2ecc71", "Left hand");
-    drawTrackedPoint(tracked.rightWrist, "#e67e22", "Right hand");
+    drawTrackedPoint(displayed.nose, "#58a6ff", "Head");
+    drawTrackedPoint(displayed.leftWrist, "#2ecc71", "Left hand");
+    drawTrackedPoint(displayed.rightWrist, "#e67e22", "Right hand");
     requestAnimationFrame(loop);
     return;
   }
 
   if (mode === "playing") {
-    const avatar = drawTrackedPoint(tracked.nose, "#58a6ff", "");
+    const avatar = drawTrackedPoint(displayed.nose, "#58a6ff", "");
     if (!avatar) { requestAnimationFrame(loop); return; }
 
     for (let i = targets.length - 1; i >= 0; i--) {
