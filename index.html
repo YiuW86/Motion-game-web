@@ -28,7 +28,15 @@
   }
   #calibrationLabel {
     position: absolute; top: 10px; width: 100%; text-align: center;
-    font-size: 1.3rem; z-index: 5;
+    font-size: 1.3rem; z-index: 5; padding: 0 20px; box-sizing: border-box;
+  }
+  #readyLabel {
+    position: absolute; top: 10px; width: 100%; text-align: center;
+    font-size: 1.3rem; z-index: 5; display: none;
+  }
+  #restartHint {
+    position: absolute; bottom: 10px; width: 100%; text-align: center;
+    font-size: 0.9rem; opacity: 0.5; z-index: 5;
   }
   canvas { display: block; background: linear-gradient(#0d1117, #161b22); }
 </style>
@@ -43,11 +51,10 @@
   <p id="status" style="opacity:0.7"></p>
 </div>
 
-<div id="calibrationLabel" style="display:none">
-  Move around and check the dots track you correctly, then press
-  <b>Enter</b> (or tap the screen) to start the game.
-</div>
+<div id="calibrationLabel" style="display:none"></div>
+<div id="readyLabel">Calibrated! Press <b>Enter</b> (or tap the screen) to start.</div>
 <div id="hud" style="display:none">Score: <span id="score">0</span></div>
+<div id="restartHint" style="display:none">Press <b>C</b> at any time to recalibrate</div>
 <canvas id="game"></canvas>
 
 <script>
@@ -55,6 +62,8 @@ const setupEl = document.getElementById("setup");
 const statusEl = document.getElementById("status");
 const hudEl = document.getElementById("hud");
 const calibrationLabelEl = document.getElementById("calibrationLabel");
+const readyLabelEl = document.getElementById("readyLabel");
+const restartHintEl = document.getElementById("restartHint");
 const scoreEl = document.getElementById("score");
 const canvas = document.getElementById("game");
 const ctx = canvas.getContext("2d");
@@ -72,39 +81,184 @@ const SERVER_URL = "wss://motion-relay-server.onrender.com";
 let ws = null;
 let score = 0;
 
-// Latest tracked points, normalized 0..1, as received from the phone
-// (updates in bursts, roughly 15 times per second).
-let tracked = {
-  nose: null,
-  leftWrist: null,
-  rightWrist: null,
+// The phone sends two raw wrist streams, keyed by whatever ML Kit called
+// them ("leftWrist" / "rightWrist"). IMPORTANT: those labels are NOT trusted
+// as actually being the player's left/right hand - a front (selfie) camera
+// can get ML Kit's own left/right label backwards. Calibration below figures
+// out, from the player's own actions, which raw stream is which hand. Until
+// calibration finishes, treat these purely as two anonymous channels.
+const RAW_KEYS = ["leftWrist", "rightWrist"];
+
+// Latest raw positions per channel, already mirrored (x flipped) so motion
+// matches what you'd see in a mirror - move your hand to your right, the
+// point on screen moves right too.
+let rawTracked = { leftWrist: null, rightWrist: null };
+
+// ---------------------------------------------------------------------
+// Calibration
+// ---------------------------------------------------------------------
+// Two stages, each showing one box near the left edge ("Left hand") and one
+// near the right edge ("Right hand"). The player holds both hands in their
+// boxes simultaneously for 5 seconds.
+//   Stage 0 (top boxes)    -> identifies which raw channel is which hand,
+//                             and records the top-left / top-right corners.
+//   Stage 1 (bottom boxes) -> records the bottom-left / bottom-right corners,
+//                             re-using the identity locked in during stage 0.
+// The four corners then define ONE shared rectangle (left-hand corners set
+// the screen-left edge, right-hand corners set the screen-right edge, top
+// corners set the screen-top edge, bottom corners the screen-bottom edge).
+// That rectangle - however big or small, depending on how far this person
+// can comfortably reach from wherever they're sitting - gets stretched to
+// fill the entire screen for BOTH hands. That's the "distance calibration":
+// we don't measure absolute distance to the TV, we calibrate to whatever
+// this person's comfortable reach is right now and map it to fill the screen.
+
+const HOLD_MS = 5000;
+const BOX_RADIUS = 0.10; // normalized units (fraction of the smaller screen dimension)
+const MIN_RANGE = 0.05;  // guard against a degenerate (near-zero-width) calibration rectangle
+
+const CALIB_BOXES = [
+  { left: { x: 0.16, y: 0.22 }, right: { x: 0.84, y: 0.22 } }, // stage 0: top
+  { left: { x: 0.16, y: 0.78 }, right: { x: 0.84, y: 0.78 } }, // stage 1: bottom
+];
+
+let calib = {
+  stage: 0,
+  identity: null,      // { left: 'leftWrist'|'rightWrist', right: '...' } once known
+  corners: {},         // topLeft, topRight, bottomLeft, bottomRight -> {x,y}
+  leftOccupant: null,  // which raw key is currently sitting in the left box
+  rightOccupant: null, // which raw key is currently sitting in the right box
+  leftMs: 0,
+  rightMs: 0,
+  rect: null,          // final { xMin, xMax, yMin, yMax } once both stages are done
 };
 
-// The points actually drawn on screen. These glide smoothly toward
-// "tracked" every animation frame (60 times per second) instead of jumping
-// straight to each new reading, which makes motion look far smoother even
-// though the underlying data arrives less often.
-let displayed = {
-  nose: null,
-  leftWrist: null,
-  rightWrist: null,
-};
-
-// How much of the remaining distance to close each frame. Higher = snappier
-// but more jittery, lower = smoother but slightly more "floaty" feeling.
-const DISPLAY_LERP = 0.35;
-
-function approach(current, target) {
-  if (!target) return current;
-  if (!current) return { x: target.x, y: target.y };
-  return {
-    x: current.x + (target.x - current.x) * DISPLAY_LERP,
-    y: current.y + (target.y - current.y) * DISPLAY_LERP,
+function resetCalibration() {
+  calib = {
+    stage: 0,
+    identity: null,
+    corners: {},
+    leftOccupant: null,
+    rightOccupant: null,
+    leftMs: 0,
+    rightMs: 0,
+    rect: null,
   };
 }
 
-let mode = "waiting";   // "waiting" -> "calibration" -> "playing"
-let targets = [];
+// Aspect-correct box radius check: treat BOX_RADIUS as a fraction of the
+// smaller canvas dimension so the box feels the same physical size
+// regardless of screen shape.
+function withinBox(point, boxCenterNorm) {
+  const scale = Math.min(canvas.width, canvas.height);
+  const dx = (point.x - boxCenterNorm.x) * canvas.width;
+  const dy = (point.y - boxCenterNorm.y) * canvas.height;
+  return Math.hypot(dx, dy) <= BOX_RADIUS * scale;
+}
+
+function updateCalibration(dtMs) {
+  const boxes = CALIB_BOXES[calib.stage];
+  const knownIdentity = calib.identity;
+
+  // Which raw key (if any) currently occupies the left box / right box.
+  let leftOccupant = null;
+  let rightOccupant = null;
+
+  if (!knownIdentity) {
+    // Stage 0: identity not known yet - scan both raw channels freely.
+    for (const key of RAW_KEYS) {
+      const p = rawTracked[key];
+      if (!p) continue;
+      if (leftOccupant === null && withinBox(p, boxes.left)) leftOccupant = key;
+      if (rightOccupant === null && withinBox(p, boxes.right)) rightOccupant = key;
+    }
+    // A single channel can't count for both boxes at once.
+    if (leftOccupant && leftOccupant === rightOccupant) rightOccupant = null;
+  } else {
+    // Later stages: identity already locked in, only accept the matching hand.
+    const lp = rawTracked[knownIdentity.left];
+    const rp = rawTracked[knownIdentity.right];
+    if (lp && withinBox(lp, boxes.left)) leftOccupant = knownIdentity.left;
+    if (rp && withinBox(rp, boxes.right)) rightOccupant = knownIdentity.right;
+  }
+
+  // Accumulate hold time; reset if the box is empty or the occupant changed.
+  if (leftOccupant && leftOccupant === calib.leftOccupant) {
+    calib.leftMs += dtMs;
+  } else {
+    calib.leftOccupant = leftOccupant;
+    calib.leftMs = leftOccupant ? dtMs : 0;
+  }
+  if (rightOccupant && rightOccupant === calib.rightOccupant) {
+    calib.rightMs += dtMs;
+  } else {
+    calib.rightOccupant = rightOccupant;
+    calib.rightMs = rightOccupant ? dtMs : 0;
+  }
+
+  const leftDone = calib.leftMs >= HOLD_MS;
+  const rightDone = calib.rightMs >= HOLD_MS;
+
+  if (leftDone && rightDone) {
+    if (calib.stage === 0) {
+      calib.identity = { left: calib.leftOccupant, right: calib.rightOccupant };
+      calib.corners.topLeft = { ...rawTracked[calib.leftOccupant] };
+      calib.corners.topRight = { ...rawTracked[calib.rightOccupant] };
+      calib.stage = 1;
+      calib.leftOccupant = null;
+      calib.rightOccupant = null;
+      calib.leftMs = 0;
+      calib.rightMs = 0;
+    } else {
+      calib.corners.bottomLeft = { ...rawTracked[calib.identity.left] };
+      calib.corners.bottomRight = { ...rawTracked[calib.identity.right] };
+      finishCalibration();
+    }
+  }
+}
+
+function finishCalibration() {
+  const c = calib.corners;
+  let xMin = (c.topLeft.x + c.bottomLeft.x) / 2;
+  let xMax = (c.topRight.x + c.bottomRight.x) / 2;
+  let yMin = (c.topLeft.y + c.topRight.y) / 2;
+  let yMax = (c.bottomLeft.y + c.bottomRight.y) / 2;
+
+  if (xMax - xMin < MIN_RANGE) {
+    const cx = (xMax + xMin) / 2;
+    xMin = cx - MIN_RANGE / 2;
+    xMax = cx + MIN_RANGE / 2;
+  }
+  if (yMax - yMin < MIN_RANGE) {
+    const cy = (yMax + yMin) / 2;
+    yMin = cy - MIN_RANGE / 2;
+    yMax = cy + MIN_RANGE / 2;
+  }
+
+  calib.rect = { xMin, xMax, yMin, yMax };
+  mode = "ready";
+  calibrationLabelEl.style.display = "none";
+  readyLabelEl.style.display = "block";
+}
+
+// Maps a raw (mirrored) point through the calibrated rectangle, stretching
+// this player's comfortable reach to fill the whole 0..1 screen space.
+function mapToScreen(p) {
+  const r = calib.rect;
+  const nx = clamp01((p.x - r.xMin) / (r.xMax - r.xMin));
+  const ny = clamp01((p.y - r.yMin) / (r.yMax - r.yMin));
+  return { x: nx, y: ny };
+}
+
+function clamp01(v) {
+  return Math.max(0, Math.min(1, v));
+}
+
+// ---------------------------------------------------------------------
+// Networking
+// ---------------------------------------------------------------------
+
+let mode = "waiting"; // "waiting" -> "calibrating" -> "ready" -> "playing"
 
 function connect(room) {
   ws = new WebSocket(`${SERVER_URL}/?room=${encodeURIComponent(room)}&role=game`);
@@ -122,14 +276,10 @@ function connect(room) {
     if (msg.type === "pose" && msg.landmarks) {
       // Mirror horizontally so moving right on your body moves right on
       // screen too, like looking in a mirror.
-      if (msg.landmarks.nose) {
-        tracked.nose = { x: 1 - msg.landmarks.nose.x, y: msg.landmarks.nose.y };
-      }
-      if (msg.landmarks.leftWrist) {
-        tracked.leftWrist = { x: 1 - msg.landmarks.leftWrist.x, y: msg.landmarks.leftWrist.y };
-      }
-      if (msg.landmarks.rightWrist) {
-        tracked.rightWrist = { x: 1 - msg.landmarks.rightWrist.x, y: msg.landmarks.rightWrist.y };
+      for (const key of RAW_KEYS) {
+        if (msg.landmarks[key]) {
+          rawTracked[key] = { x: 1 - msg.landmarks[key].x, y: msg.landmarks[key].y };
+        }
       }
 
       if (mode === "waiting") {
@@ -150,91 +300,171 @@ document.getElementById("connectBtn").onclick = () => {
 };
 
 function enterCalibration() {
-  mode = "calibration";
+  mode = "calibrating";
+  resetCalibration();
   setupEl.style.display = "none";
   calibrationLabelEl.style.display = "block";
+  restartHintEl.style.display = "block";
+  lastFrameTime = performance.now();
   requestAnimationFrame(loop);
 }
 
 function startGame() {
-  if (mode !== "calibration") return;
+  if (mode !== "ready") return;
   mode = "playing";
-  calibrationLabelEl.style.display = "none";
+  readyLabelEl.style.display = "none";
   hudEl.style.display = "block";
+  score = 0;
+  scoreEl.textContent = score;
+  targets = [];
   spawnTarget();
 }
 
-// Let the person press Enter, or tap/click anywhere, to move from
-// calibration into the actual game once they're happy with the tracking.
-window.addEventListener("keydown", (e) => { if (e.key === "Enter") startGame(); });
-window.addEventListener("click", startGame);
+window.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") startGame();
+  if (e.key.toLowerCase() === "c" && mode !== "waiting") enterCalibration();
+});
+window.addEventListener("click", () => {
+  if (mode === "ready") startGame();
+});
+
+// ---------------------------------------------------------------------
+// Game
+// ---------------------------------------------------------------------
+
+let targets = [];
 
 function spawnTarget() {
   targets.push({
     x: Math.random(),
     y: -0.05,
-    speed: 0.0025 + Math.random() * 0.0025,
+    speed: 0.0035 + Math.random() * 0.0035, // a bit faster: hands react quicker than head did
   });
 }
 
-function drawTrackedPoint(point, color, label) {
-  if (!point) return;
+const CATCH_RADIUS_PX = 46;
+const HAND_MARKER_RADIUS_PX = 30;
+
+function drawHand(point, color, label) {
+  if (!point) return null;
   const x = point.x * canvas.width;
   const y = point.y * canvas.height;
   ctx.beginPath();
-  ctx.arc(x, y, 26, 0, Math.PI * 2);
+  ctx.arc(x, y, HAND_MARKER_RADIUS_PX, 0, Math.PI * 2);
   ctx.fillStyle = color;
   ctx.fill();
-  ctx.font = "16px sans-serif";
-  ctx.fillStyle = "#fff";
-  ctx.textAlign = "center";
-  ctx.fillText(label, x, y - 36);
+  if (label) {
+    ctx.font = "16px sans-serif";
+    ctx.fillStyle = "#fff";
+    ctx.textAlign = "center";
+    ctx.fillText(label, x, y - HAND_MARKER_RADIUS_PX - 10);
+  }
   return { x, y };
 }
 
+function drawCalibrationBox(boxCenterNorm, label, holdMs, occupied) {
+  const scale = Math.min(canvas.width, canvas.height);
+  const x = boxCenterNorm.x * canvas.width;
+  const y = boxCenterNorm.y * canvas.height;
+  const r = BOX_RADIUS * scale;
+
+  ctx.beginPath();
+  ctx.arc(x, y, r, 0, Math.PI * 2);
+  ctx.strokeStyle = occupied ? "#2ecc71" : "#8b949e";
+  ctx.lineWidth = 4;
+  ctx.stroke();
+
+  // progress arc
+  const pct = Math.min(1, holdMs / HOLD_MS);
+  if (pct > 0) {
+    ctx.beginPath();
+    ctx.arc(x, y, r - 8, -Math.PI / 2, -Math.PI / 2 + pct * Math.PI * 2);
+    ctx.strokeStyle = "#58a6ff";
+    ctx.lineWidth = 6;
+    ctx.stroke();
+  }
+
+  ctx.font = "18px sans-serif";
+  ctx.fillStyle = "#fff";
+  ctx.textAlign = "center";
+  ctx.fillText(label, x, y + r + 26);
+}
+
+let lastFrameTime = performance.now();
+
 function loop() {
+  const now = performance.now();
+  const dtMs = now - lastFrameTime;
+  lastFrameTime = now;
+
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-  // Smoothly glide the displayed points toward wherever the latest data
-  // says they should be, every frame, regardless of game mode.
-  displayed.nose = approach(displayed.nose, tracked.nose);
-  displayed.leftWrist = approach(displayed.leftWrist, tracked.leftWrist);
-  displayed.rightWrist = approach(displayed.rightWrist, tracked.rightWrist);
+  if (mode === "calibrating") {
+    updateCalibration(dtMs);
+    const boxes = CALIB_BOXES[calib.stage];
 
-  if (mode === "calibration") {
-    // Show all three tracked points clearly labeled, so it's obvious
-    // on the TV exactly what is and isn't being detected right now.
-    drawTrackedPoint(displayed.nose, "#58a6ff", "Head");
-    drawTrackedPoint(displayed.leftWrist, "#2ecc71", "Left hand");
-    drawTrackedPoint(displayed.rightWrist, "#e67e22", "Right hand");
+    calibrationLabelEl.innerHTML = calib.stage === 0
+      ? "Stretch your <b>left hand</b> to the left box and your <b>right hand</b> to the right box. Hold both for 5 seconds."
+      : "Now lower both hands to the boxes below. Hold for 5 seconds.";
+
+    drawCalibrationBox(boxes.left, "Left hand", calib.leftMs, !!calib.leftOccupant);
+    drawCalibrationBox(boxes.right, "Right hand", calib.rightMs, !!calib.rightOccupant);
+
+    // Show whatever raw channels are currently visible, unlabeled until
+    // identity is resolved (stage 0), labeled once it is (stage 1+).
+    for (const key of RAW_KEYS) {
+      const p = rawTracked[key];
+      if (!p) continue;
+      let label = "";
+      let color = "#8b949e";
+      if (calib.identity) {
+        if (key === calib.identity.left) { label = "L"; color = "#2ecc71"; }
+        else if (key === calib.identity.right) { label = "R"; color = "#e67e22"; }
+      }
+      drawHand(p, color, label);
+    }
+
     requestAnimationFrame(loop);
     return;
   }
 
-  if (mode === "playing") {
-    const avatar = drawTrackedPoint(displayed.nose, "#58a6ff", "");
-    if (!avatar) { requestAnimationFrame(loop); return; }
+  if (mode === "ready" || mode === "playing") {
+    let leftScreen = null;
+    let rightScreen = null;
+    if (calib.identity && calib.rect) {
+      const lp = rawTracked[calib.identity.left];
+      const rp = rawTracked[calib.identity.right];
+      if (lp) leftScreen = mapToScreen(lp);
+      if (rp) rightScreen = mapToScreen(rp);
+    }
 
-    for (let i = targets.length - 1; i >= 0; i--) {
-      const t = targets[i];
-      t.y += t.speed;
+    const leftPx = drawHand(leftScreen, "#2ecc71", mode === "playing" ? "" : "Left");
+    const rightPx = drawHand(rightScreen, "#e67e22", mode === "playing" ? "" : "Right");
 
-      const tx = t.x * canvas.width;
-      const ty = t.y * canvas.height;
-      ctx.beginPath();
-      ctx.arc(tx, ty, 16, 0, Math.PI * 2);
-      ctx.fillStyle = "#f1c40f";
-      ctx.fill();
+    if (mode === "playing") {
+      for (let i = targets.length - 1; i >= 0; i--) {
+        const t = targets[i];
+        t.y += t.speed;
 
-      const dist = Math.hypot(tx - avatar.x, ty - avatar.y);
-      if (dist < 40) {
-        score++;
-        scoreEl.textContent = score;
-        targets.splice(i, 1);
-        spawnTarget();
-      } else if (t.y > 1.1) {
-        targets.splice(i, 1);
-        spawnTarget();
+        const tx = t.x * canvas.width;
+        const ty = t.y * canvas.height;
+        ctx.beginPath();
+        ctx.arc(tx, ty, 16, 0, Math.PI * 2);
+        ctx.fillStyle = "#f1c40f";
+        ctx.fill();
+
+        const hitLeft = leftPx && Math.hypot(tx - leftPx.x, ty - leftPx.y) < CATCH_RADIUS_PX;
+        const hitRight = rightPx && Math.hypot(tx - rightPx.x, ty - rightPx.y) < CATCH_RADIUS_PX;
+
+        if (hitLeft || hitRight) {
+          score++;
+          scoreEl.textContent = score;
+          targets.splice(i, 1);
+          spawnTarget();
+        } else if (t.y > 1.1) {
+          targets.splice(i, 1);
+          spawnTarget();
+        }
       }
     }
 
