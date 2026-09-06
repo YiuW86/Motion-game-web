@@ -273,6 +273,8 @@ const PLAYER_X_FRAC = 0.14;      // player's fixed horizontal position
 const PLAYER_HEIGHT_FRAC = 0.24;
 const QUEUE_PADDING_FRAC = 0.03; // extra horizontal gap between queued monsters
 const ATTACK_INTERVAL_MS = 1500; // how often the frontmost monster hits the player
+const MONSTER_TRAVEL_MS = 15000; // time for a monster to cross from spawn to engage range, if never hit
+const HIT_STUN_MS = 1000;        // freeze + tremble + red tint duration when a monster is hit
 const HOVER_MS = 500;            // dwell time to select a plaque / button
 const PLAYER_HP_MAX = 100;
 const FADE_MS = 900;
@@ -392,7 +394,7 @@ function spawnMonster(stage) {
     targetX: 0,
     state: "approaching",
     attackTimer: 0,
-    flashTimer: 0,
+    hitTimer: 0,
     question: generateQuestion(),
   });
   refreshPlaques();
@@ -422,28 +424,47 @@ function updateSpawning(dtMs) {
 }
 
 function updateMonsters(dtMs) {
-  // Recompute each monster's queue target position, front-to-back.
+  // Recompute each monster's queue target position, front-to-back. Spacing
+  // is anchored to the monster ahead's CURRENT position (not its target),
+  // so a monster that's stunned/lagging behind its own target can never be
+  // overlapped by the one behind it.
   for (let i = 0; i < monsters.length; i++) {
     const m = monsters[i];
     if (i === 0) {
       m.targetX = engageX();
     } else {
       const prev = monsters[i - 1];
-      m.targetX = prev.targetX + prev.width * 0.55 + m.width * 0.55 + canvas.width * QUEUE_PADDING_FRAC;
+      m.targetX = prev.x + prev.width * 0.55 + m.width * 0.55 + canvas.width * QUEUE_PADDING_FRAC;
     }
   }
 
-  const alpha = 1 - Math.exp(-dtMs / 300);
+  // Constant crawl speed: whatever distance the FRONT slot currently covers
+  // (spawn point to engage point) takes MONSTER_TRAVEL_MS to cross if never
+  // interrupted. Recomputed every frame so it stays correct if the window
+  // is resized. Queued monsters use the same speed, so they naturally take
+  // less time since they have less distance to close.
+  const speedPxPerMs = Math.max(0, (canvas.width * 1.08 - engageX())) / MONSTER_TRAVEL_MS;
+
   for (let i = 0; i < monsters.length; i++) {
     const m = monsters[i];
-    m.x += (m.targetX - m.x) * alpha;
+
+    if (m.hitTimer > 0) {
+      // Frozen: stunned by a hit. No movement, no walk-cycle advance, no
+      // attacking - just count down the stun while the tremble/red-tint
+      // render effect (handled in drawMonster) plays.
+      m.hitTimer -= dtMs;
+      if (m.hitTimer < 0) m.hitTimer = 0;
+      continue;
+    }
+
+    const desiredX = m.x - speedPxPerMs * dtMs;
+    m.x = Math.max(desiredX, m.targetX);
 
     m.frameTimer += dtMs;
     if (m.frameTimer >= m.frameMs) {
       m.frameTimer -= m.frameMs;
       m.frameIdx = (m.frameIdx + 1) % m.frameCount;
     }
-    if (m.flashTimer > 0) m.flashTimer -= dtMs;
 
     if (i === 0 && Math.abs(m.x - m.targetX) < 3) {
       m.state = "engaging";
@@ -534,7 +555,7 @@ function onPlaqueSelected(value) {
   if (value === front.question.answer) {
     const dmg = Math.round(front.hpMax * front.dmgPct);
     front.hp = Math.max(0, front.hp - dmg);
-    front.flashTimer = 300;
+    front.hitTimer = HIT_STUN_MS;
     triggerPlayerAttack();
     if (front.hp <= 0) {
       monsters.shift();
@@ -804,10 +825,21 @@ function drawMonster(m, isFront) {
   const y = canvas.height * GROUND_Y_FRAC - m.height;
 
   if (img && img.naturalWidth) {
-    if (m.flashTimer > 0) {
+    if (m.hitTimer > 0) {
+      // Tremble: a quick decaying shake while stunned.
+      const stunPct = m.hitTimer / HIT_STUN_MS; // 1 -> 0 over the stun duration
+      const shakeAmount = 6 * stunPct;
+      const shakeX = Math.sin(m.hitTimer * 0.09) * shakeAmount;
+      const shakeY = Math.cos(m.hitTimer * 0.13) * shakeAmount * 0.4;
+
+      ctx.drawImage(img, x + shakeX, y + shakeY, m.width, m.height);
+
+      // Reddish shade, tinting only the sprite's own drawn pixels (not its
+      // transparent surroundings), fading out as the stun wears off.
       ctx.save();
-      ctx.filter = "brightness(2) saturate(0.4)";
-      ctx.drawImage(img, x, y, m.width, m.height);
+      ctx.globalCompositeOperation = "source-atop";
+      ctx.fillStyle = `rgba(220, 20, 20, ${0.55 * stunPct})`;
+      ctx.fillRect(x + shakeX, y + shakeY, m.width, m.height);
       ctx.restore();
     } else {
       ctx.drawImage(img, x, y, m.width, m.height);
