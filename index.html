@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Motion Catch Game</title>
+<title>Samurai Math Quest</title>
 <style>
   html, body {
     margin: 0; padding: 0; height: 100%; background: #0d1117; color: #fff;
@@ -11,7 +11,7 @@
   }
   #setup {
     position: absolute; inset: 0; display: flex; flex-direction: column;
-    align-items: center; justify-content: center; gap: 16px; z-index: 10;
+    align-items: center; justify-content: center; gap: 16px; z-index: 20;
     background: #0d1117;
   }
   #setup input {
@@ -22,30 +22,25 @@
     font-size: 1.2rem; padding: 10px 24px; border-radius: 8px; border: none;
     background: #58a6ff; color: #001; cursor: pointer;
   }
-  #hud {
-    position: absolute; top: 10px; left: 10px; font-size: 1.4rem; z-index: 5;
-  }
-  canvas { display: block; background: linear-gradient(#0d1117, #161b22); }
+  #setup button:disabled { background: #444; color: #999; cursor: not-allowed; }
+  canvas { display: block; background: #000; }
 </style>
 </head>
 <body>
 
 <div id="setup">
-  <h1>Motion Catch</h1>
+  <h1>Samurai Math Quest</h1>
   <p>Enter the room code shown/typed on your phone app</p>
   <input id="roomInput" maxlength="4" placeholder="CODE" />
-  <button id="connectBtn">Start Game</button>
+  <button id="connectBtn">Connect</button>
   <p id="status" style="opacity:0.7"></p>
 </div>
 
-<div id="hud" style="display:none">Score: <span id="score">0</span></div>
 <canvas id="game"></canvas>
 
 <script>
 const setupEl = document.getElementById("setup");
 const statusEl = document.getElementById("status");
-const hudEl = document.getElementById("hud");
-const scoreEl = document.getElementById("score");
 const canvas = document.getElementById("game");
 const ctx = canvas.getContext("2d");
 
@@ -59,34 +54,197 @@ resize();
 // !!! CHANGE THIS to your deployed relay server address (wss://...) !!!
 const SERVER_URL = "wss://motion-relay-server-eu.onrender.com";
 
+// =====================================================================
+// Asset loading
+// =====================================================================
+// All monster/player animations are plain PNG frame sequences (extracted
+// from the original GIFs) rather than relying on any GIF-decoding library.
+// This keeps everything self-contained - no CDN dependency, works offline
+// once the folder is copied anywhere, and gives full control over exactly
+// which frame is shown on which game tick (needed for the idle <-> attack
+// animation switch on the player).
+const ASSET_MANIFEST = {
+  zombie: 25,
+  oni: 25,
+  fenrir: 25,
+  transform: 48,
+  samurai: 20,
+};
+
+const ASSET_FRAMES = {};       // prefix -> [Image, Image, ...]
+let backgroundImg = null;
+let assetsTotal = 0;
+let assetsLoaded = 0;
+let assetsReady = false;
+
+function loadAllAssets(onDone) {
+  const toLoad = [];
+
+  for (const [prefix, count] of Object.entries(ASSET_MANIFEST)) {
+    ASSET_FRAMES[prefix] = new Array(count);
+    for (let i = 0; i < count; i++) {
+      toLoad.push({ prefix, i, src: `assets/${prefix}_${String(i).padStart(2, "0")}.png` });
+    }
+  }
+  assetsTotal = toLoad.length + 1; // +1 for background
+
+  function markLoaded() {
+    assetsLoaded++;
+    statusEl.textContent = `Loading assets... ${assetsLoaded}/${assetsTotal}`;
+    if (assetsLoaded >= assetsTotal) {
+      assetsReady = true;
+      onDone();
+    }
+  }
+
+  for (const item of toLoad) {
+    const img = new Image();
+    img.onload = markLoaded;
+    img.onerror = markLoaded; // don't block the whole game on one bad file
+    img.src = item.src;
+    ASSET_FRAMES[item.prefix][item.i] = img;
+  }
+
+  const bg = new Image();
+  bg.onload = () => { backgroundImg = bg; markLoaded(); };
+  bg.onerror = markLoaded;
+  bg.src = "assets/background.jpg";
+}
+
+loadAllAssets(() => {
+  statusEl.textContent = "Assets ready. Enter a room code to begin.";
+});
+
+// =====================================================================
+// Hand tracking: networking, filtering handoff, calibration
+// (Unchanged in spirit from the previous build - the phone/relay pipeline
+// and calibration flow are identical. Only what happens AFTER calibration
+// changes.)
+// =====================================================================
+
+const RAW_KEYS = ["leftWrist", "rightWrist"];
+let rawTracked = { leftWrist: null, rightWrist: null };
+
+const CALIB_HOLD_MS = 5000;
+const BOX_RADIUS = 0.10;
+const MIN_RANGE = 0.05;
+
+const CALIB_BOXES = [
+  { left: { x: 0.16, y: 0.22 }, right: { x: 0.84, y: 0.22 } },
+  { left: { x: 0.16, y: 0.78 }, right: { x: 0.84, y: 0.78 } },
+];
+
+let calib = null;
+function resetCalibration() {
+  calib = {
+    stage: 0,
+    identity: null,
+    corners: {},
+    leftOccupant: null,
+    rightOccupant: null,
+    leftMs: 0,
+    rightMs: 0,
+    rect: null,
+  };
+}
+resetCalibration();
+
+function withinBox(point, boxCenterNorm) {
+  const scale = Math.min(canvas.width, canvas.height);
+  const dx = (point.x - boxCenterNorm.x) * canvas.width;
+  const dy = (point.y - boxCenterNorm.y) * canvas.height;
+  return Math.hypot(dx, dy) <= BOX_RADIUS * scale;
+}
+
+function updateCalibration(dtMs) {
+  const boxes = CALIB_BOXES[calib.stage];
+  const knownIdentity = calib.identity;
+  let leftOccupant = null;
+  let rightOccupant = null;
+
+  if (!knownIdentity) {
+    for (const key of RAW_KEYS) {
+      const p = rawTracked[key];
+      if (!p) continue;
+      if (leftOccupant === null && withinBox(p, boxes.left)) leftOccupant = key;
+      if (rightOccupant === null && withinBox(p, boxes.right)) rightOccupant = key;
+    }
+    if (leftOccupant && leftOccupant === rightOccupant) rightOccupant = null;
+  } else {
+    const lp = rawTracked[knownIdentity.left];
+    const rp = rawTracked[knownIdentity.right];
+    if (lp && withinBox(lp, boxes.left)) leftOccupant = knownIdentity.left;
+    if (rp && withinBox(rp, boxes.right)) rightOccupant = knownIdentity.right;
+  }
+
+  if (leftOccupant && leftOccupant === calib.leftOccupant) calib.leftMs += dtMs;
+  else { calib.leftOccupant = leftOccupant; calib.leftMs = leftOccupant ? dtMs : 0; }
+  if (rightOccupant && rightOccupant === calib.rightOccupant) calib.rightMs += dtMs;
+  else { calib.rightOccupant = rightOccupant; calib.rightMs = rightOccupant ? dtMs : 0; }
+
+  const leftDone = calib.leftMs >= CALIB_HOLD_MS;
+  const rightDone = calib.rightMs >= CALIB_HOLD_MS;
+
+  if (leftDone && rightDone) {
+    if (calib.stage === 0) {
+      calib.identity = { left: calib.leftOccupant, right: calib.rightOccupant };
+      calib.corners.topLeft = { ...rawTracked[calib.leftOccupant] };
+      calib.corners.topRight = { ...rawTracked[calib.rightOccupant] };
+      calib.stage = 1;
+      calib.leftOccupant = null; calib.rightOccupant = null;
+      calib.leftMs = 0; calib.rightMs = 0;
+    } else {
+      calib.corners.bottomLeft = { ...rawTracked[calib.identity.left] };
+      calib.corners.bottomRight = { ...rawTracked[calib.identity.right] };
+      finishCalibration();
+    }
+  }
+}
+
+function finishCalibration() {
+  const c = calib.corners;
+  let xMin = (c.topLeft.x + c.bottomLeft.x) / 2;
+  let xMax = (c.topRight.x + c.bottomRight.x) / 2;
+  let yMin = (c.topLeft.y + c.topRight.y) / 2;
+  let yMax = (c.bottomLeft.y + c.bottomRight.y) / 2;
+
+  if (xMax - xMin < MIN_RANGE) { const cx=(xMax+xMin)/2; xMin=cx-MIN_RANGE/2; xMax=cx+MIN_RANGE/2; }
+  if (yMax - yMin < MIN_RANGE) { const cy=(yMax+yMin)/2; yMin=cy-MIN_RANGE/2; yMax=cy+MIN_RANGE/2; }
+
+  calib.rect = { xMin, xMax, yMin, yMax };
+  enterStartPrompt();
+}
+
+function mapToScreen(p) {
+  const r = calib.rect;
+  const nx = clamp01((p.x - r.xMin) / (r.xMax - r.xMin));
+  const ny = clamp01((p.y - r.yMin) / (r.yMax - r.yMin));
+  return { x: nx, y: ny };
+}
+function clamp01(v) { return Math.max(0, Math.min(1, v)); }
+
+// =====================================================================
+// Networking
+// =====================================================================
+
 let ws = null;
-let score = 0;
-let avatar = { x: 0.5, y: 0.5 }; // normalized 0..1 position, from phone
-let targets = [];
-let running = false;
+let mode = "waiting"; // waiting -> calibrating -> start_prompt -> playing -> dying -> transform_anim -> retry_prompt
+                      //                                        \-> level_clear -> playagain_prompt
 
 function connect(room) {
   ws = new WebSocket(`${SERVER_URL}/?room=${encodeURIComponent(room)}&role=game`);
-
   ws.onopen = () => { statusEl.textContent = "Connected. Waiting for phone..."; };
-
   ws.onmessage = (event) => {
     let msg;
     try { msg = JSON.parse(event.data); } catch (e) { return; }
-
-    if (msg.type === "connected") {
-      statusEl.textContent = "Waiting for your phone to join room " + room;
-    }
-
-    if (msg.type === "pose" && msg.landmarks && msg.landmarks.nose) {
-      // Mirror horizontally so moving your body right moves the avatar right
-      // from the TV viewer's perspective (like a mirror).
-      avatar.x = 1 - msg.landmarks.nose.x;
-      avatar.y = msg.landmarks.nose.y;
-      if (!running) startGame();
+    if (msg.type === "connected") statusEl.textContent = "Waiting for your phone to join room " + room;
+    if (msg.type === "pose" && msg.landmarks) {
+      for (const key of RAW_KEYS) {
+        if (msg.landmarks[key]) rawTracked[key] = { x: 1 - msg.landmarks[key].x, y: msg.landmarks[key].y };
+      }
+      if (mode === "waiting" && assetsReady) enterCalibration();
     }
   };
-
   ws.onclose = () => { statusEl.textContent = "Disconnected. Refresh to retry."; };
   ws.onerror = () => { statusEl.textContent = "Connection error."; };
 }
@@ -98,55 +256,803 @@ document.getElementById("connectBtn").onclick = () => {
   connect(room);
 };
 
-function startGame() {
-  running = true;
+function enterCalibration() {
+  mode = "calibrating";
+  resetCalibration();
   setupEl.style.display = "none";
-  hudEl.style.display = "block";
-  spawnTarget();
+  lastFrameTime = performance.now();
   requestAnimationFrame(loop);
 }
 
-function spawnTarget() {
-  targets.push({
-    x: Math.random(),
-    y: -0.05,
-    speed: 0.0025 + Math.random() * 0.0025,
+// =====================================================================
+// Game constants (tunable)
+// =====================================================================
+
+const GROUND_Y_FRAC = 0.84;      // where every character's feet sit
+const PLAYER_X_FRAC = 0.14;      // player's fixed horizontal position
+const PLAYER_HEIGHT_FRAC = 0.24;
+const QUEUE_PADDING_FRAC = 0.03; // extra horizontal gap between queued monsters
+const ATTACK_INTERVAL_MS = 1500; // how often the frontmost monster hits the player
+const HOVER_MS = 500;            // dwell time to select a plaque / button
+const PLAYER_HP_MAX = 100;
+const FADE_MS = 900;
+const TRANSFORM_DISPLAY_MS = 1500;
+
+const STAGES = [
+  { type: "zombie", count: 50, hpMax: 100, dmgPct: 0.25, atk: 4,  heightFrac: 0.22, prefix: "zombie", frameMs: 80 },
+  { type: "oni",     count: 2,  hpMax: 200, dmgPct: 0.15, atk: 8,  heightFrac: 0.44, prefix: "oni",     frameMs: 80 },
+  { type: "fenrir",  count: 1,  hpMax: 400, dmgPct: 0.06, atk: 14, heightFrac: 0.85, prefix: "fenrir",  frameMs: 80 },
+];
+
+// =====================================================================
+// Math question generation
+// =====================================================================
+// Addition/subtraction operands: up to 2 digits (1-99).
+// Multiplication/division operands: kept to 1 digit (1-9) each - note this
+// is about the operands used to BUILD the question, not the displayed
+// result, which is why a division question's displayed dividend can still
+// be two digits (divisor * quotient), and a multiplication result can be
+// up to 81.
+function generateQuestion() {
+  const ops = ["+", "-", "*", "/"];
+  const op = ops[Math.floor(Math.random() * ops.length)];
+  let a, b, answer, text;
+  if (op === "+") {
+    a = 1 + Math.floor(Math.random() * 99);
+    b = 1 + Math.floor(Math.random() * 99);
+    answer = a + b;
+    text = `${a} + ${b}`;
+  } else if (op === "-") {
+    a = 1 + Math.floor(Math.random() * 99);
+    b = 1 + Math.floor(Math.random() * 99);
+    if (b > a) [a, b] = [b, a];
+    answer = a - b;
+    text = `${a} - ${b}`;
+  } else if (op === "*") {
+    a = 1 + Math.floor(Math.random() * 9);
+    b = 1 + Math.floor(Math.random() * 9);
+    answer = a * b;
+    text = `${a} \u00D7 ${b}`;
+  } else {
+    b = 1 + Math.floor(Math.random() * 9);
+    const q = 1 + Math.floor(Math.random() * 9);
+    a = b * q;
+    answer = q;
+    text = `${a} \u00F7 ${b}`;
+  }
+  return { text, answer };
+}
+
+// =====================================================================
+// Game state
+// =====================================================================
+
+let player = null;
+let monsters = [];
+let plaques = [];
+let stageIndex = 0;
+let spawnedInStage = 0;
+let onScreenTarget = 0;
+let monsterIdCounter = 0;
+let fadeTimer = 0;
+let transformTimer = 0;
+let transformFrameIdx = 0;
+let wrongFlashTimer = 0;
+let actionButton = null; // { label, x, y, w, h, holdMs, occupant, onSelect }
+let recalibrateBtn = { holdMs: 0, occupant: null };
+
+function playerWidth() {
+  const img0 = ASSET_FRAMES.samurai[0];
+  const aspect = (img0 && img0.naturalWidth) ? img0.naturalWidth / img0.naturalHeight : 0.85;
+  return canvas.height * PLAYER_HEIGHT_FRAC * aspect;
+}
+function engageX() {
+  return canvas.width * PLAYER_X_FRAC + playerWidth() * 0.9;
+}
+
+function initGameState() {
+  player = {
+    hp: PLAYER_HP_MAX,
+    hpMax: PLAYER_HP_MAX,
+    animMode: "idle",       // "idle" | "attack"
+    frameIdx: 0,
+    frameTimer: 0,
+    hitFlash: 0,
+  };
+  monsters = [];
+  plaques = [];
+  stageIndex = 0;
+  spawnedInStage = 0;
+  onScreenTarget = 0;
+  wrongFlashTimer = 0;
+}
+
+function currentStage() { return STAGES[stageIndex]; }
+
+function spawnMonster(stage) {
+  const frames = ASSET_FRAMES[stage.prefix];
+  const img0 = frames[0];
+  const aspect = (img0 && img0.naturalWidth) ? img0.naturalWidth / img0.naturalHeight : 1;
+  const height = canvas.height * stage.heightFrac;
+  const width = height * aspect;
+  monsters.push({
+    id: monsterIdCounter++,
+    type: stage.type,
+    prefix: stage.prefix,
+    frameCount: ASSET_MANIFEST[stage.prefix],
+    frameMs: stage.frameMs,
+    frameIdx: Math.floor(Math.random() * ASSET_MANIFEST[stage.prefix]),
+    frameTimer: 0,
+    hp: stage.hpMax,
+    hpMax: stage.hpMax,
+    dmgPct: stage.dmgPct,
+    atkDmg: stage.atk,
+    width, height,
+    x: canvas.width * 1.08,
+    targetX: 0,
+    state: "approaching",
+    attackTimer: 0,
+    flashTimer: 0,
+    question: generateQuestion(),
+  });
+  refreshPlaques();
+}
+
+function updateSpawning(dtMs) {
+  const stage = currentStage();
+  if (!stage) return; // level clear already handled elsewhere
+
+  if (monsters.length === 0 && onScreenTarget === 0 && spawnedInStage < stage.count) {
+    onScreenTarget = Math.min(1 + Math.floor(Math.random() * 4), stage.count - spawnedInStage);
+  }
+
+  while (monsters.length < onScreenTarget && spawnedInStage < stage.count) {
+    spawnMonster(stage);
+    spawnedInStage++;
+  }
+
+  if (monsters.length === 0 && spawnedInStage >= stage.count) {
+    stageIndex++;
+    spawnedInStage = 0;
+    onScreenTarget = 0;
+    if (stageIndex >= STAGES.length) {
+      enterLevelClear();
+    }
+  }
+}
+
+function updateMonsters(dtMs) {
+  // Recompute each monster's queue target position, front-to-back.
+  for (let i = 0; i < monsters.length; i++) {
+    const m = monsters[i];
+    if (i === 0) {
+      m.targetX = engageX();
+    } else {
+      const prev = monsters[i - 1];
+      m.targetX = prev.targetX + prev.width * 0.55 + m.width * 0.55 + canvas.width * QUEUE_PADDING_FRAC;
+    }
+  }
+
+  const alpha = 1 - Math.exp(-dtMs / 300);
+  for (let i = 0; i < monsters.length; i++) {
+    const m = monsters[i];
+    m.x += (m.targetX - m.x) * alpha;
+
+    m.frameTimer += dtMs;
+    if (m.frameTimer >= m.frameMs) {
+      m.frameTimer -= m.frameMs;
+      m.frameIdx = (m.frameIdx + 1) % m.frameCount;
+    }
+    if (m.flashTimer > 0) m.flashTimer -= dtMs;
+
+    if (i === 0 && Math.abs(m.x - m.targetX) < 3) {
+      m.state = "engaging";
+      m.attackTimer += dtMs;
+      if (m.attackTimer >= ATTACK_INTERVAL_MS) {
+        m.attackTimer = 0;
+        player.hp = Math.max(0, player.hp - m.atkDmg);
+        player.hitFlash = 250;
+        if (player.hp <= 0) enterDying();
+      }
+    } else {
+      m.state = "approaching";
+    }
+  }
+}
+
+// ---------------------------------------------------------------------
+// Plaques
+// ---------------------------------------------------------------------
+
+function shuffle(arr) {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+function refreshPlaques() {
+  if (monsters.length === 0) return;
+  const frontAnswer = monsters[0].question.answer;
+  const distinctAnswers = [...new Set(monsters.map(m => m.question.answer))];
+  const correctPool = [frontAnswer, ...distinctAnswers.filter(a => a !== frontAnswer)];
+
+  const correctSlots = [];
+  let idx = 0;
+  while (correctSlots.length < 6) {
+    correctSlots.push(correctPool[idx % correctPool.length]);
+    idx++;
+  }
+
+  const decoys = [];
+  let guard = 0;
+  while (decoys.length < 4 && guard < 500) {
+    guard++;
+    const candidate = 1 + Math.floor(Math.random() * 98);
+    if (!distinctAnswers.includes(candidate) && !decoys.includes(candidate)) decoys.push(candidate);
+  }
+  while (decoys.length < 4) decoys.push(1 + Math.floor(Math.random() * 98)); // fallback if guard exhausted
+
+  const values = shuffle([...correctSlots, ...decoys]);
+  plaques = values.map(v => ({ value: v, occupant: null, holdMs: 0 }));
+}
+
+function plaqueLayout() {
+  const n = plaques.length || 10;
+  const w = canvas.width * 0.065;
+  const h = w * 1.3;
+  const totalW = canvas.width * 0.92;
+  const gap = (totalW - n * w) / (n - 1);
+  const x0 = canvas.width * 0.04;
+  const y = canvas.height * 0.90;
+  const boxes = [];
+  for (let i = 0; i < n; i++) {
+    boxes.push({ x: x0 + i * (w + gap), y: y - h / 2, w, h });
+  }
+  return boxes;
+}
+
+function pointInRect(px, py, box) {
+  return px >= box.x && px <= box.x + box.w && py >= box.y && py <= box.y + box.h;
+}
+
+function getCursorsPixels() {
+  const cursors = [];
+  if (calib && calib.identity && calib.rect) {
+    const lp = rawTracked[calib.identity.left];
+    const rp = rawTracked[calib.identity.right];
+    if (lp) { const s = mapToScreen(lp); cursors.push({ id: "L", px: s.x * canvas.width, py: s.y * canvas.height }); }
+    if (rp) { const s = mapToScreen(rp); cursors.push({ id: "R", px: s.x * canvas.width, py: s.y * canvas.height }); }
+  }
+  return cursors;
+}
+
+function onPlaqueSelected(value) {
+  if (monsters.length === 0) return;
+  const front = monsters[0];
+  if (value === front.question.answer) {
+    const dmg = Math.round(front.hpMax * front.dmgPct);
+    front.hp = Math.max(0, front.hp - dmg);
+    front.flashTimer = 300;
+    triggerPlayerAttack();
+    if (front.hp <= 0) {
+      monsters.shift();
+      refreshPlaques();
+    }
+  } else {
+    wrongFlashTimer = 250;
+  }
+}
+
+function updatePlaques(dtMs, cursors) {
+  if (mode !== "playing" || monsters.length === 0) return;
+  const layout = plaqueLayout();
+  for (let i = 0; i < plaques.length; i++) {
+    const p = plaques[i];
+    const box = layout[i];
+    let occ = null;
+    for (const c of cursors) {
+      if (pointInRect(c.px, c.py, box)) { occ = c.id; break; }
+    }
+    if (occ && occ === p.occupant) p.holdMs += dtMs;
+    else { p.occupant = occ; p.holdMs = occ ? dtMs : 0; }
+
+    if (p.holdMs >= HOVER_MS) {
+      onPlaqueSelected(p.value);
+      for (const pp of plaques) { pp.holdMs = 0; pp.occupant = null; }
+      break;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------
+// Player animation
+// ---------------------------------------------------------------------
+
+const PLAYER_IDLE_FRAMES = [0, 1, 2, 3];
+const PLAYER_ATTACK_FRAMES = [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+const PLAYER_IDLE_FRAME_MS = 160;
+const PLAYER_ATTACK_FRAME_MS = 70;
+
+function triggerPlayerAttack() {
+  player.animMode = "attack";
+  player.frameIdx = 0;
+  player.frameTimer = 0;
+}
+
+function updatePlayerAnim(dtMs) {
+  if (player.hitFlash > 0) player.hitFlash -= dtMs;
+  player.frameTimer += dtMs;
+  if (player.animMode === "idle") {
+    const ms = PLAYER_IDLE_FRAME_MS;
+    if (player.frameTimer >= ms) {
+      player.frameTimer -= ms;
+      player.frameIdx = (player.frameIdx + 1) % PLAYER_IDLE_FRAMES.length;
+    }
+  } else {
+    const ms = PLAYER_ATTACK_FRAME_MS;
+    if (player.frameTimer >= ms) {
+      player.frameTimer -= ms;
+      player.frameIdx++;
+      if (player.frameIdx >= PLAYER_ATTACK_FRAMES.length) {
+        player.animMode = "idle";
+        player.frameIdx = 0;
+        player.frameTimer = 0;
+      }
+    }
+  }
+}
+
+function currentPlayerFrameImage() {
+  const list = player.animMode === "idle" ? PLAYER_IDLE_FRAMES : PLAYER_ATTACK_FRAMES;
+  const idx = list[Math.min(player.frameIdx, list.length - 1)];
+  return ASSET_FRAMES.samurai[idx];
+}
+
+// ---------------------------------------------------------------------
+// Mode transitions
+// ---------------------------------------------------------------------
+
+function enterStartPrompt() {
+  mode = "start_prompt";
+  actionButton = makeActionButton("Start", () => {
+    initGameState();
+    mode = "playing";
   });
 }
 
-function loop() {
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
+function enterDying() {
+  mode = "dying";
+  fadeTimer = 0;
+}
 
-  // draw avatar (controlled by phone)
-  const ax = avatar.x * canvas.width;
-  const ay = avatar.y * canvas.height;
-  ctx.beginPath();
-  ctx.arc(ax, ay, 30, 0, Math.PI * 2);
-  ctx.fillStyle = "#58a6ff";
-  ctx.fill();
+function enterTransformAnim() {
+  mode = "transform_anim";
+  transformTimer = 0;
+  transformFrameIdx = 0;
+}
 
-  // update + draw falling targets, check collision with avatar
-  for (let i = targets.length - 1; i >= 0; i--) {
-    const t = targets[i];
-    t.y += t.speed;
+function enterRetryPrompt() {
+  mode = "retry_prompt";
+  actionButton = makeActionButton("Retry", () => {
+    initGameState();
+    mode = "playing";
+  });
+}
 
-    const tx = t.x * canvas.width;
-    const ty = t.y * canvas.height;
-    ctx.beginPath();
-    ctx.arc(tx, ty, 16, 0, Math.PI * 2);
-    ctx.fillStyle = "#f1c40f";
-    ctx.fill();
+function enterLevelClear() {
+  mode = "level_clear";
+  actionButton = makeActionButton("Play Again", () => {
+    initGameState();
+    mode = "playing";
+  });
+}
 
-    const dist = Math.hypot(tx - ax, ty - ay);
-    if (dist < 40) {
-      score++;
-      scoreEl.textContent = score;
-      targets.splice(i, 1);
-      spawnTarget();
-    } else if (t.y > 1.1) {
-      targets.splice(i, 1);
-      spawnTarget();
+function makeActionButton(label, onSelect) {
+  const w = canvas.width * 0.22;
+  const h = canvas.height * 0.12;
+  return {
+    label,
+    x: canvas.width / 2 - w / 2,
+    y: canvas.height * 0.62,
+    w, h,
+    holdMs: 0, occupant: null,
+    onSelect,
+  };
+}
+
+function updateActionButton(dtMs, cursors) {
+  if (!actionButton) return;
+  let occ = null;
+  for (const c of cursors) {
+    if (pointInRect(c.px, c.py, actionButton)) { occ = c.id; break; }
+  }
+  if (occ && occ === actionButton.occupant) actionButton.holdMs += dtMs;
+  else { actionButton.occupant = occ; actionButton.holdMs = occ ? dtMs : 0; }
+
+  if (actionButton.holdMs >= HOVER_MS) {
+    const cb = actionButton.onSelect;
+    actionButton = null;
+    cb();
+  }
+}
+
+function recalibrateBox() {
+  const w = canvas.width * 0.11, h = canvas.height * 0.08;
+  return { x: canvas.width - w - 16, y: 16, w, h };
+}
+
+function updateRecalibrateButton(dtMs, cursors) {
+  const box = recalibrateBox();
+  let occ = null;
+  for (const c of cursors) if (pointInRect(c.px, c.py, box)) { occ = c.id; break; }
+  if (occ && occ === recalibrateBtn.occupant) recalibrateBtn.holdMs += dtMs;
+  else { recalibrateBtn.occupant = occ; recalibrateBtn.holdMs = occ ? dtMs : 0; }
+  if (recalibrateBtn.holdMs >= HOVER_MS) {
+    recalibrateBtn.holdMs = 0; recalibrateBtn.occupant = null;
+    resetCalibration();
+    mode = "calibrating";
+  }
+}
+
+// ---------------------------------------------------------------------
+// Manual mouse-click fallback (for testing without a phone)
+// ---------------------------------------------------------------------
+canvas.addEventListener("click", (e) => {
+  const rect = canvas.getBoundingClientRect();
+  const px = e.clientX - rect.left;
+  const py = e.clientY - rect.top;
+
+  if (mode === "playing" && monsters.length > 0) {
+    const layout = plaqueLayout();
+    for (let i = 0; i < plaques.length; i++) {
+      if (pointInRect(px, py, layout[i])) { onPlaqueSelected(plaques[i].value); return; }
     }
+    const rbox = recalibrateBox();
+    if (pointInRect(px, py, rbox)) {
+      resetCalibration();
+      mode = "calibrating";
+      return;
+    }
+  }
+  if (actionButton && pointInRect(px, py, actionButton)) {
+    const cb = actionButton.onSelect;
+    actionButton = null;
+    cb();
+  }
+});
+
+// =====================================================================
+// Rendering helpers
+// =====================================================================
+
+function drawBackground() {
+  if (!backgroundImg) { ctx.fillStyle = "#0d1117"; ctx.fillRect(0,0,canvas.width,canvas.height); return; }
+  const cw = canvas.width, ch = canvas.height;
+  const iw = backgroundImg.naturalWidth, ih = backgroundImg.naturalHeight;
+  const scale = Math.max(cw / iw, ch / ih);
+  const dw = iw * scale, dh = ih * scale;
+  ctx.drawImage(backgroundImg, (cw - dw) / 2, (ch - dh) / 2, dw, dh);
+}
+
+function drawHandCursor(rawPoint, color, label) {
+  if (!rawPoint || !calib || !calib.rect) return;
+  const s = mapToScreen(rawPoint);
+  const x = s.x * canvas.width, y = s.y * canvas.height;
+  ctx.beginPath();
+  ctx.arc(x, y, 28, 0, Math.PI * 2);
+  ctx.fillStyle = color;
+  ctx.globalAlpha = 0.85;
+  ctx.fill();
+  ctx.globalAlpha = 1;
+  if (label) {
+    ctx.font = "14px sans-serif";
+    ctx.fillStyle = "#fff";
+    ctx.textAlign = "center";
+    ctx.fillText(label, x, y - 36);
+  }
+}
+
+function drawCalibBox(boxCenterNorm, label, holdMs, occupied) {
+  const scale = Math.min(canvas.width, canvas.height);
+  const x = boxCenterNorm.x * canvas.width, y = boxCenterNorm.y * canvas.height;
+  const r = BOX_RADIUS * scale;
+  ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2);
+  ctx.strokeStyle = occupied ? "#2ecc71" : "#8b949e"; ctx.lineWidth = 4; ctx.stroke();
+  const pct = Math.min(1, holdMs / CALIB_HOLD_MS);
+  if (pct > 0) {
+    ctx.beginPath();
+    ctx.arc(x, y, r - 8, -Math.PI/2, -Math.PI/2 + pct * Math.PI * 2);
+    ctx.strokeStyle = "#58a6ff"; ctx.lineWidth = 6; ctx.stroke();
+  }
+  ctx.font = "18px sans-serif"; ctx.fillStyle = "#fff"; ctx.textAlign = "center";
+  ctx.fillText(label, x, y + r + 26);
+}
+
+function drawPlayer() {
+  const img = currentPlayerFrameImage();
+  if (!img || !img.naturalWidth) return;
+  const h = canvas.height * PLAYER_HEIGHT_FRAC;
+  const w = h * (img.naturalWidth / img.naturalHeight);
+  const x = canvas.width * PLAYER_X_FRAC - w / 2;
+  const y = canvas.height * GROUND_Y_FRAC - h;
+
+  if (player.hitFlash > 0) {
+    ctx.save();
+    ctx.filter = "brightness(1.8) saturate(2) hue-rotate(-20deg)";
+    ctx.drawImage(img, x, y, w, h);
+    ctx.restore();
+  } else {
+    ctx.drawImage(img, x, y, w, h);
+  }
+}
+
+function drawHpBar(x, y, w, h, ratio) {
+  ctx.fillStyle = "rgba(0,0,0,0.5)";
+  ctx.fillRect(x, y, w, h);
+  ctx.fillStyle = ratio > 0.4 ? "#2ecc71" : (ratio > 0.15 ? "#f1c40f" : "#e74c3c");
+  ctx.fillRect(x, y, w * Math.max(0, ratio), h);
+  ctx.strokeStyle = "#fff"; ctx.lineWidth = 1.5;
+  ctx.strokeRect(x, y, w, h);
+}
+
+function drawMonster(m, isFront) {
+  const frames = ASSET_FRAMES[m.prefix];
+  const img = frames && frames[m.frameIdx];
+  const x = m.x - m.width / 2;
+  const y = canvas.height * GROUND_Y_FRAC - m.height;
+
+  if (img && img.naturalWidth) {
+    if (m.flashTimer > 0) {
+      ctx.save();
+      ctx.filter = "brightness(2) saturate(0.4)";
+      ctx.drawImage(img, x, y, m.width, m.height);
+      ctx.restore();
+    } else {
+      ctx.drawImage(img, x, y, m.width, m.height);
+    }
+  }
+
+  // HP bar + question
+  const barW = Math.max(70, m.width * 0.9);
+  const barX = m.x - barW / 2;
+  const barY = y - 34;
+  drawHpBar(barX, barY, barW, 10, m.hp / m.hpMax);
+
+  ctx.font = `bold ${Math.max(16, Math.round(canvas.height * 0.024))}px sans-serif`;
+  ctx.textAlign = "center";
+  ctx.fillStyle = isFront ? "#ffe066" : "#ffffff";
+  ctx.fillText(m.question.text, m.x, barY - 10);
+
+  if (isFront) {
+    ctx.fillStyle = "#ffe066";
+    ctx.font = "20px sans-serif";
+    ctx.fillText("\u25BC", m.x, barY - 34 - Math.round(canvas.height*0.024));
+  }
+}
+
+function drawPlaques() {
+  const layout = plaqueLayout();
+  for (let i = 0; i < plaques.length; i++) {
+    const p = plaques[i];
+    const box = layout[i];
+    const cx = box.x + box.w / 2;
+
+    ctx.fillStyle = "#6b4226";
+    roundRect(box.x, box.y, box.w, box.h, 6);
+    ctx.fill();
+    ctx.strokeStyle = "#3e2412"; ctx.lineWidth = 3;
+    roundRect(box.x, box.y, box.w, box.h, 6);
+    ctx.stroke();
+
+    ctx.fillStyle = "#1a1a1a";
+    ctx.font = `bold ${Math.max(16, Math.round(box.w * 0.4))}px sans-serif`;
+    ctx.textAlign = "center";
+    ctx.fillText(String(p.value), cx, box.y + box.h * 0.62);
+
+    const pct = Math.min(1, p.holdMs / HOVER_MS);
+    if (pct > 0) {
+      ctx.fillStyle = "rgba(88,166,255,0.55)";
+      ctx.fillRect(box.x, box.y + box.h * (1 - pct), box.w, box.h * pct);
+    }
+  }
+}
+
+function roundRect(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+
+function drawActionButton() {
+  if (!actionButton) return;
+  const b = actionButton;
+  ctx.fillStyle = "#6b4226";
+  roundRect(b.x, b.y, b.w, b.h, 12); ctx.fill();
+  ctx.strokeStyle = "#3e2412"; ctx.lineWidth = 4;
+  roundRect(b.x, b.y, b.w, b.h, 12); ctx.stroke();
+
+  ctx.fillStyle = "#fff";
+  ctx.font = `bold ${Math.round(b.h * 0.34)}px sans-serif`;
+  ctx.textAlign = "center";
+  ctx.fillText(b.label, b.x + b.w / 2, b.y + b.h * 0.58);
+
+  const pct = Math.min(1, b.holdMs / HOVER_MS);
+  if (pct > 0) {
+    ctx.fillStyle = "rgba(88,166,255,0.5)";
+    ctx.fillRect(b.x, b.y + b.h * (1 - pct), b.w, b.h * pct);
+  }
+}
+
+function drawRecalibrateButton() {
+  const box = recalibrateBox();
+  ctx.fillStyle = "rgba(60,60,60,0.75)";
+  roundRect(box.x, box.y, box.w, box.h, 8); ctx.fill();
+  ctx.strokeStyle = "#aaa"; ctx.lineWidth = 2;
+  roundRect(box.x, box.y, box.w, box.h, 8); ctx.stroke();
+  ctx.fillStyle = "#fff";
+  ctx.font = `${Math.round(box.h * 0.28)}px sans-serif`;
+  ctx.textAlign = "center";
+  ctx.fillText("Recalibrate", box.x + box.w/2, box.y + box.h*0.6);
+  const pct = Math.min(1, recalibrateBtn.holdMs / HOVER_MS);
+  if (pct > 0) {
+    ctx.fillStyle = "rgba(88,166,255,0.5)";
+    ctx.fillRect(box.x, box.y + box.h*(1-pct), box.w, box.h*pct);
+  }
+}
+
+function drawPlayerHud() {
+  const w = canvas.width * 0.22, h = canvas.height * 0.035;
+  const x = 16, y = 16;
+  drawHpBar(x, y, w, h, player.hp / player.hpMax);
+  ctx.fillStyle = "#fff";
+  ctx.font = `${Math.round(h*0.7)}px sans-serif`;
+  ctx.textAlign = "left";
+  ctx.fillText(`HP ${player.hp}/${player.hpMax}`, x + 6, y + h - 4);
+
+  const stage = currentStage();
+  ctx.textAlign = "center";
+  ctx.font = `${Math.round(canvas.height*0.026)}px sans-serif`;
+  if (stage) {
+    ctx.fillText(`${stage.type.toUpperCase()}  ${spawnedInStage}/${stage.count}`, canvas.width/2, 30);
+  }
+}
+
+// =====================================================================
+// Main loop
+// =====================================================================
+
+let lastFrameTime = performance.now();
+
+function loop() {
+  const now = performance.now();
+  const dtMs = Math.min(100, now - lastFrameTime); // clamp huge gaps (tab backgrounded, etc.)
+  lastFrameTime = now;
+
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  drawBackground();
+
+  if (mode === "calibrating") {
+    updateCalibration(dtMs);
+    const boxes = CALIB_BOXES[calib.stage];
+    ctx.fillStyle = "rgba(0,0,0,0.35)";
+    ctx.fillRect(0, 0, canvas.width, canvas.height * 0.16);
+    ctx.fillStyle = "#fff"; ctx.font = "24px sans-serif"; ctx.textAlign = "center";
+    ctx.fillText(
+      calib.stage === 0
+        ? "Stretch your LEFT hand to the left box and RIGHT hand to the right box. Hold 5 seconds."
+        : "Now lower both hands to the boxes below. Hold 5 seconds.",
+      canvas.width / 2, canvas.height * 0.08
+    );
+    drawCalibBox(boxes.left, "Left hand", calib.leftMs, !!calib.leftOccupant);
+    drawCalibBox(boxes.right, "Right hand", calib.rightMs, !!calib.rightOccupant);
+    for (const key of RAW_KEYS) {
+      const p = rawTracked[key];
+      if (!p) continue;
+      let label = "", color = "#8b949e";
+      if (calib.identity) {
+        if (key === calib.identity.left) { label = "L"; color = "#2ecc71"; }
+        else if (key === calib.identity.right) { label = "R"; color = "#e67e22"; }
+      }
+      const x = p.x * canvas.width, y = p.y * canvas.height;
+      ctx.beginPath(); ctx.arc(x, y, 26, 0, Math.PI*2); ctx.fillStyle = color; ctx.fill();
+      if (label) { ctx.fillStyle = "#fff"; ctx.font = "16px sans-serif"; ctx.fillText(label, x, y - 34); }
+    }
+    requestAnimationFrame(loop);
+    return;
+  }
+
+  const cursors = getCursorsPixels();
+
+  if (mode === "start_prompt" || mode === "retry_prompt" || mode === "level_clear") {
+    if (mode === "level_clear") {
+      ctx.fillStyle = "#ffe066";
+      ctx.font = "bold 48px sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText("LEVEL CLEAR!", canvas.width/2, canvas.height*0.4);
+    } else if (mode === "start_prompt") {
+      ctx.fillStyle = "#fff";
+      ctx.font = "bold 36px sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText("Calibrated! Hover Start to begin.", canvas.width/2, canvas.height*0.4);
+    } else {
+      ctx.fillStyle = "#fff";
+      ctx.font = "bold 36px sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText("You were defeated...", canvas.width/2, canvas.height*0.4);
+    }
+    updateActionButton(dtMs, cursors);
+    drawActionButton();
+    if (calib.identity) {
+      drawHandCursor(rawTracked[calib.identity.left], "#2ecc71");
+      drawHandCursor(rawTracked[calib.identity.right], "#e67e22");
+    }
+    requestAnimationFrame(loop);
+    return;
+  }
+
+  if (mode === "playing") {
+    updateSpawning(dtMs);
+    updateMonsters(dtMs);
+    updatePlayerAnim(dtMs);
+    updatePlaques(dtMs, cursors);
+    updateRecalibrateButton(dtMs, cursors);
+    if (wrongFlashTimer > 0) wrongFlashTimer -= dtMs;
+
+    drawPlayer();
+    for (let i = monsters.length - 1; i >= 0; i--) drawMonster(monsters[i], i === 0);
+    drawPlaques();
+    drawRecalibrateButton();
+    drawPlayerHud();
+
+    if (calib.identity) {
+      drawHandCursor(rawTracked[calib.identity.left], "#2ecc71");
+      drawHandCursor(rawTracked[calib.identity.right], "#e67e22");
+    }
+
+    if (wrongFlashTimer > 0) {
+      ctx.fillStyle = `rgba(255,0,0,${0.15 * (wrongFlashTimer/250)})`;
+      ctx.fillRect(0,0,canvas.width,canvas.height);
+    }
+
+    requestAnimationFrame(loop);
+    return;
+  }
+
+  if (mode === "dying") {
+    updateMonsters(0); // freeze positions, just keep drawing last frame
+    drawPlayer();
+    for (let i = monsters.length - 1; i >= 0; i--) drawMonster(monsters[i], i === 0);
+    fadeTimer += dtMs;
+    const pct = Math.min(1, fadeTimer / FADE_MS);
+    ctx.fillStyle = `rgba(0,0,0,${pct})`;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    if (pct >= 1) enterTransformAnim();
+    requestAnimationFrame(loop);
+    return;
+  }
+
+  if (mode === "transform_anim") {
+    ctx.fillStyle = "#000";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    const frames = ASSET_FRAMES.transform;
+    const perFrameMs = TRANSFORM_DISPLAY_MS / frames.length;
+    transformTimer += dtMs;
+    transformFrameIdx = Math.min(frames.length - 1, Math.floor(transformTimer / perFrameMs));
+    const img = frames[transformFrameIdx];
+    if (img && img.naturalWidth) {
+      const h = canvas.height * 0.6;
+      const w = h * (img.naturalWidth / img.naturalHeight);
+      ctx.drawImage(img, canvas.width/2 - w/2, canvas.height/2 - h/2, w, h);
+    }
+    if (transformTimer >= TRANSFORM_DISPLAY_MS) enterRetryPrompt();
+    requestAnimationFrame(loop);
+    return;
   }
 
   requestAnimationFrame(loop);
