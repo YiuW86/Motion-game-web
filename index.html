@@ -54,24 +54,92 @@ resize();
 // !!! CHANGE THIS to your deployed relay server address (wss://...) !!!
 const SERVER_URL = "wss://motion-relay-server-eu.onrender.com";
 
+function clamp01(v) { return Math.max(0, Math.min(1, v)); }
+
+// =====================================================================
+// Persistence (credits, owned swords, equipped sword)
+// =====================================================================
+// This is a real page you host yourself (not a sandboxed Claude artifact),
+// so localStorage is the normal, correct tool here. It's scoped to your
+// browser/device, not a cloud account - namespaced keys below to avoid
+// clashing with any other project you might host under the same domain.
+
+const STORAGE_PREFIX = "samuraiMathQuest_v1_";
+
+function loadNumber(key, fallback) {
+  try {
+    const v = localStorage.getItem(STORAGE_PREFIX + key);
+    if (v === null) return fallback;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : fallback;
+  } catch (e) { return fallback; }
+}
+function saveNumber(key, value) {
+  try { localStorage.setItem(STORAGE_PREFIX + key, String(value)); } catch (e) {}
+}
+function loadJSON(key, fallback) {
+  try {
+    const v = localStorage.getItem(STORAGE_PREFIX + key);
+    return v === null ? fallback : JSON.parse(v);
+  } catch (e) { return fallback; }
+}
+function saveJSON(key, value) {
+  try { localStorage.setItem(STORAGE_PREFIX + key, JSON.stringify(value)); } catch (e) {}
+}
+
+let credits = loadNumber("credits", 0);
+let ownedSwords = loadJSON("ownedSwords", ["starter"]);
+let equippedSword = loadJSON("equippedSword", "starter");
+if (!ownedSwords.includes("starter")) ownedSwords.push("starter");
+
+function saveCredits() { saveNumber("credits", credits); }
+function saveOwnedSwords() { saveJSON("ownedSwords", ownedSwords); }
+function saveEquippedSword() { saveJSON("equippedSword", equippedSword); }
+
+// =====================================================================
+// Swords (shop items). "mult" scales the damage-percent-per-hit already
+// used by monsters/bosses - e.g. a zombie's base 25%/hit becomes ~57%
+// with Crimson Fang equipped.
+// =====================================================================
+
+const SWORDS = [
+  { id: "starter",      name: "Katana",       price: 0,    mult: 1.00, icon: null },
+  { id: "frostbite",    name: "Frostbite",    price: 50,   mult: 1.15, icon: "sword_frostbite" },
+  { id: "solar_fang",   name: "Solar Fang",   price: 120,  mult: 1.30, icon: "sword_solar_fang" },
+  { id: "jade_serpent", name: "Jade Serpent", price: 220,  mult: 1.45, icon: "sword_jade_serpent" },
+  { id: "rose_thorn",   name: "Rose Thorn",   price: 350,  mult: 1.60, icon: "sword_rose_thorn" },
+  { id: "azure_reaver", name: "Azure Reaver", price: 500,  mult: 1.80, icon: "sword_azure_reaver" },
+  { id: "sky_piercer",  name: "Sky Piercer",  price: 700,  mult: 2.00, icon: "sword_sky_piercer" },
+  { id: "void_cleaver", name: "Void Cleaver", price: 950,  mult: 2.25, icon: "sword_void_cleaver" },
+  { id: "crimson_fang", name: "Crimson Fang", price: 1250, mult: 2.50, icon: "sword_crimson_fang" },
+];
+
+function getDamageMultiplier() {
+  const sw = SWORDS.find(s => s.id === equippedSword);
+  return sw ? sw.mult : 1.0;
+}
+
+const CREDIT_BY_TYPE = { zombie: 5, oni: 20, fenrir: 100, onioh_round: 15 };
+const LEVEL1_CLEAR_BONUS = 50;
+const LEVEL2_CLEAR_BONUS = 300;
+
 // =====================================================================
 // Asset loading
 // =====================================================================
-// All monster/player animations are plain PNG frame sequences (extracted
-// from the original GIFs) rather than relying on any GIF-decoding library.
-// This keeps everything self-contained - no CDN dependency, works offline
-// once the folder is copied anywhere, and gives full control over exactly
-// which frame is shown on which game tick (needed for the idle <-> attack
-// animation switch on the player).
+
 const ASSET_MANIFEST = {
-  zombie: 25,
-  oni: 25,
-  fenrir: 25,
-  transform: 48,
-  samurai: 20,
+  zombie: 25, oni: 25, fenrir: 25, transform: 48, samurai: 20,
+  onioh_idle: 25, onioh_fireslash: 25, onioh_spirits: 79, onioh_beam: 62, maskon: 16,
 };
 
-const ASSET_FRAMES = {};       // prefix -> [Image, Image, ...]
+const SINGLE_ASSETS_MANIFEST = [
+  "fireball",
+  "sword_frostbite", "sword_solar_fang", "sword_jade_serpent", "sword_rose_thorn",
+  "sword_azure_reaver", "sword_sky_piercer", "sword_void_cleaver", "sword_crimson_fang",
+];
+
+const ASSET_FRAMES = {};
+const SINGLE_ASSETS = {};
 let backgroundImg = null;
 let assetsTotal = 0;
 let assetsLoaded = 0;
@@ -83,26 +151,27 @@ function loadAllAssets(onDone) {
   for (const [prefix, count] of Object.entries(ASSET_MANIFEST)) {
     ASSET_FRAMES[prefix] = new Array(count);
     for (let i = 0; i < count; i++) {
-      toLoad.push({ prefix, i, src: `assets/${prefix}_${String(i).padStart(2, "0")}.png` });
+      toLoad.push({ kind: "seq", prefix, i, src: `assets/${prefix}_${String(i).padStart(2, "0")}.png` });
     }
+  }
+  for (const name of SINGLE_ASSETS_MANIFEST) {
+    toLoad.push({ kind: "single", name, src: `assets/${name}.png` });
   }
   assetsTotal = toLoad.length + 1; // +1 for background
 
   function markLoaded() {
     assetsLoaded++;
     statusEl.textContent = `Loading assets... ${assetsLoaded}/${assetsTotal}`;
-    if (assetsLoaded >= assetsTotal) {
-      assetsReady = true;
-      onDone();
-    }
+    if (assetsLoaded >= assetsTotal) { assetsReady = true; onDone(); }
   }
 
   for (const item of toLoad) {
     const img = new Image();
     img.onload = markLoaded;
-    img.onerror = markLoaded; // don't block the whole game on one bad file
+    img.onerror = markLoaded;
     img.src = item.src;
-    ASSET_FRAMES[item.prefix][item.i] = img;
+    if (item.kind === "seq") ASSET_FRAMES[item.prefix][item.i] = img;
+    else SINGLE_ASSETS[item.name] = img;
   }
 
   const bg = new Image();
@@ -116,120 +185,15 @@ loadAllAssets(() => {
 });
 
 // =====================================================================
-// Hand tracking: networking, filtering handoff, calibration
-// (Unchanged in spirit from the previous build - the phone/relay pipeline
-// and calibration flow are identical. Only what happens AFTER calibration
-// changes.)
+// Hand tracking: networking + filtering handoff
 // =====================================================================
 
 const RAW_KEYS = ["leftWrist", "rightWrist"];
 let rawTracked = { leftWrist: null, rightWrist: null };
 
-const CALIB_HOLD_MS = 5000;
-const BOX_RADIUS = 0.10;
-const MIN_RANGE = 0.05;
-
-const CALIB_BOXES = [
-  { left: { x: 0.16, y: 0.22 }, right: { x: 0.84, y: 0.22 } },
-  { left: { x: 0.16, y: 0.78 }, right: { x: 0.84, y: 0.78 } },
-];
-
-let calib = null;
-function resetCalibration() {
-  calib = {
-    stage: 0,
-    identity: null,
-    corners: {},
-    leftOccupant: null,
-    rightOccupant: null,
-    leftMs: 0,
-    rightMs: 0,
-    rect: null,
-  };
-}
-resetCalibration();
-
-function withinBox(point, boxCenterNorm) {
-  const scale = Math.min(canvas.width, canvas.height);
-  const dx = (point.x - boxCenterNorm.x) * canvas.width;
-  const dy = (point.y - boxCenterNorm.y) * canvas.height;
-  return Math.hypot(dx, dy) <= BOX_RADIUS * scale;
-}
-
-function updateCalibration(dtMs) {
-  const boxes = CALIB_BOXES[calib.stage];
-  const knownIdentity = calib.identity;
-  let leftOccupant = null;
-  let rightOccupant = null;
-
-  if (!knownIdentity) {
-    for (const key of RAW_KEYS) {
-      const p = rawTracked[key];
-      if (!p) continue;
-      if (leftOccupant === null && withinBox(p, boxes.left)) leftOccupant = key;
-      if (rightOccupant === null && withinBox(p, boxes.right)) rightOccupant = key;
-    }
-    if (leftOccupant && leftOccupant === rightOccupant) rightOccupant = null;
-  } else {
-    const lp = rawTracked[knownIdentity.left];
-    const rp = rawTracked[knownIdentity.right];
-    if (lp && withinBox(lp, boxes.left)) leftOccupant = knownIdentity.left;
-    if (rp && withinBox(rp, boxes.right)) rightOccupant = knownIdentity.right;
-  }
-
-  if (leftOccupant && leftOccupant === calib.leftOccupant) calib.leftMs += dtMs;
-  else { calib.leftOccupant = leftOccupant; calib.leftMs = leftOccupant ? dtMs : 0; }
-  if (rightOccupant && rightOccupant === calib.rightOccupant) calib.rightMs += dtMs;
-  else { calib.rightOccupant = rightOccupant; calib.rightMs = rightOccupant ? dtMs : 0; }
-
-  const leftDone = calib.leftMs >= CALIB_HOLD_MS;
-  const rightDone = calib.rightMs >= CALIB_HOLD_MS;
-
-  if (leftDone && rightDone) {
-    if (calib.stage === 0) {
-      calib.identity = { left: calib.leftOccupant, right: calib.rightOccupant };
-      calib.corners.topLeft = { ...rawTracked[calib.leftOccupant] };
-      calib.corners.topRight = { ...rawTracked[calib.rightOccupant] };
-      calib.stage = 1;
-      calib.leftOccupant = null; calib.rightOccupant = null;
-      calib.leftMs = 0; calib.rightMs = 0;
-    } else {
-      calib.corners.bottomLeft = { ...rawTracked[calib.identity.left] };
-      calib.corners.bottomRight = { ...rawTracked[calib.identity.right] };
-      finishCalibration();
-    }
-  }
-}
-
-function finishCalibration() {
-  const c = calib.corners;
-  let xMin = (c.topLeft.x + c.bottomLeft.x) / 2;
-  let xMax = (c.topRight.x + c.bottomRight.x) / 2;
-  let yMin = (c.topLeft.y + c.topRight.y) / 2;
-  let yMax = (c.bottomLeft.y + c.bottomRight.y) / 2;
-
-  if (xMax - xMin < MIN_RANGE) { const cx=(xMax+xMin)/2; xMin=cx-MIN_RANGE/2; xMax=cx+MIN_RANGE/2; }
-  if (yMax - yMin < MIN_RANGE) { const cy=(yMax+yMin)/2; yMin=cy-MIN_RANGE/2; yMax=cy+MIN_RANGE/2; }
-
-  calib.rect = { xMin, xMax, yMin, yMax };
-  enterStartPrompt();
-}
-
-function mapToScreen(p) {
-  const r = calib.rect;
-  const nx = clamp01((p.x - r.xMin) / (r.xMax - r.xMin));
-  const ny = clamp01((p.y - r.yMin) / (r.yMax - r.yMin));
-  return { x: nx, y: ny };
-}
-function clamp01(v) { return Math.max(0, Math.min(1, v)); }
-
-// =====================================================================
-// Networking
-// =====================================================================
-
 let ws = null;
-let mode = "waiting"; // waiting -> calibrating -> start_prompt -> playing -> dying -> transform_anim -> retry_prompt
-                      //                                        \-> level_clear -> playagain_prompt
+let mode = "waiting";
+let currentLevel = null; // "level1" | "level2" - which level retry/dying flows apply to
 
 function connect(room) {
   ws = new WebSocket(`${SERVER_URL}/?room=${encodeURIComponent(room)}&role=game`);
@@ -256,6 +220,97 @@ document.getElementById("connectBtn").onclick = () => {
   connect(room);
 };
 
+// =====================================================================
+// Calibration - free-range, guided-but-flexible
+// =====================================================================
+// Rather than requiring you to land your hand inside a small fixed target
+// (which breaks down if you're far from the camera - your reach might
+// never register as "inside" a small box), this just watches how far you
+// actually move during a short guided window and uses THAT as your
+// personal range. Direction prompts cycle by for guidance, but there's
+// nothing precise to hit.
+
+const CALIB_READY_MS = 2000;
+const CALIB_PHASE_MS = 2500;
+const CALIB_PHASES = ["LEFT", "RIGHT", "UP", "DOWN"];
+const CALIB_FREE_MS = CALIB_PHASE_MS * CALIB_PHASES.length;
+const MIN_RANGE = 0.05;
+
+let calib = null;
+
+function freshRange() {
+  return { minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity, sumX: 0, count: 0 };
+}
+
+function resetCalibration() {
+  calib = {
+    phase: "ready",
+    readyTimer: 0,
+    trackTimer: 0,
+    ranges: { leftWrist: freshRange(), rightWrist: freshRange() },
+    identity: null,
+    rect: null,
+  };
+}
+resetCalibration();
+
+function updateCalibration(dtMs) {
+  if (calib.phase === "ready") {
+    calib.readyTimer += dtMs;
+    if (calib.readyTimer >= CALIB_READY_MS) { calib.phase = "tracking"; calib.trackTimer = 0; }
+    return;
+  }
+  if (calib.phase === "tracking") {
+    calib.trackTimer += dtMs;
+    for (const key of RAW_KEYS) {
+      const p = rawTracked[key];
+      if (!p) continue;
+      const r = calib.ranges[key];
+      r.minX = Math.min(r.minX, p.x); r.maxX = Math.max(r.maxX, p.x);
+      r.minY = Math.min(r.minY, p.y); r.maxY = Math.max(r.maxY, p.y);
+      r.sumX += p.x; r.count++;
+    }
+    if (calib.trackTimer >= CALIB_FREE_MS) finishCalibration();
+  }
+}
+
+function finishCalibration() {
+  const [keyA, keyB] = RAW_KEYS;
+  const rA = calib.ranges[keyA], rB = calib.ranges[keyB];
+  const meanA = rA.count ? rA.sumX / rA.count : 0.5;
+  const meanB = rB.count ? rB.sumX / rB.count : 0.5;
+  const leftKey = meanA <= meanB ? keyA : keyB;
+  const rightKey = leftKey === keyA ? keyB : keyA;
+  calib.identity = { left: leftKey, right: rightKey };
+
+  const L = calib.ranges[leftKey], R = calib.ranges[rightKey];
+  let xMin = Number.isFinite(L.minX) ? L.minX : 0.3;
+  let xMax = Number.isFinite(R.maxX) ? R.maxX : 0.7;
+  let yMin = Math.min(
+    Number.isFinite(L.minY) ? L.minY : 0.3,
+    Number.isFinite(R.minY) ? R.minY : 0.3
+  );
+  let yMax = Math.max(
+    Number.isFinite(L.maxY) ? L.maxY : 0.7,
+    Number.isFinite(R.maxY) ? R.maxY : 0.7
+  );
+
+  if (xMax - xMin < MIN_RANGE) { const cx=(xMax+xMin)/2; xMin=cx-MIN_RANGE/2; xMax=cx+MIN_RANGE/2; }
+  if (yMax - yMin < MIN_RANGE) { const cy=(yMax+yMin)/2; yMin=cy-MIN_RANGE/2; yMax=cy+MIN_RANGE/2; }
+
+  calib.phase = "done";
+  calib.rect = { xMin, xMax, yMin, yMax };
+  mode = "hub";
+  initHub();
+}
+
+function mapToScreen(p) {
+  const r = calib.rect;
+  const nx = clamp01((p.x - r.xMin) / (r.xMax - r.xMin));
+  const ny = clamp01((p.y - r.yMin) / (r.yMax - r.yMin));
+  return { x: nx, y: ny };
+}
+
 function enterCalibration() {
   mode = "calibrating";
   resetCalibration();
@@ -265,225 +320,26 @@ function enterCalibration() {
 }
 
 // =====================================================================
-// Game constants (tunable)
+// Shared: cursors, plaques (hover-select), action buttons
 // =====================================================================
 
-const GROUND_Y_FRAC = 0.84;      // where every character's feet sit
-const PLAYER_X_FRAC = 0.14;      // player's fixed horizontal position
-const PLAYER_HEIGHT_FRAC = 0.24;
-const QUEUE_PADDING_FRAC = 0.03; // extra horizontal gap between queued monsters
-const ATTACK_INTERVAL_MS = 1500; // how often the frontmost monster hits the player
-const MONSTER_TRAVEL_MS = 15000; // time for a monster to cross from spawn to engage range, if never hit
-const HIT_STUN_MS = 1000;        // freeze + tremble + red tint duration when a monster is hit
-const HOVER_MS = 500;            // dwell time to select a plaque / button
-const PLAYER_HP_MAX = 100;
-const FADE_MS = 900;
-const TRANSFORM_DISPLAY_MS = 1500;
+const HOVER_MS = 500;     // dwell time for math-answer plaques
+const SHOP_HOVER_MS = 5000; // dwell time to buy/equip a sword
 
-const STAGES = [
-  { type: "zombie", count: 50, hpMax: 100, dmgPct: 0.25, atk: 4,  heightFrac: 0.22, prefix: "zombie", frameMs: 80 },
-  { type: "oni",     count: 2,  hpMax: 200, dmgPct: 0.15, atk: 8,  heightFrac: 0.44, prefix: "oni",     frameMs: 80 },
-  { type: "fenrir",  count: 1,  hpMax: 400, dmgPct: 0.06, atk: 14, heightFrac: 0.85, prefix: "fenrir",  frameMs: 80 },
-];
-
-// =====================================================================
-// Math question generation
-// =====================================================================
-// Addition/subtraction operands: up to 2 digits (1-99).
-// Multiplication/division operands: kept to 1 digit (1-9) each - note this
-// is about the operands used to BUILD the question, not the displayed
-// result, which is why a division question's displayed dividend can still
-// be two digits (divisor * quotient), and a multiplication result can be
-// up to 81.
-function generateQuestion() {
-  const ops = ["+", "-", "*", "/"];
-  const op = ops[Math.floor(Math.random() * ops.length)];
-  let a, b, answer, text;
-  if (op === "+") {
-    a = 1 + Math.floor(Math.random() * 99);
-    b = 1 + Math.floor(Math.random() * 99);
-    answer = a + b;
-    text = `${a} + ${b}`;
-  } else if (op === "-") {
-    a = 1 + Math.floor(Math.random() * 99);
-    b = 1 + Math.floor(Math.random() * 99);
-    if (b > a) [a, b] = [b, a];
-    answer = a - b;
-    text = `${a} - ${b}`;
-  } else if (op === "*") {
-    a = 1 + Math.floor(Math.random() * 9);
-    b = 1 + Math.floor(Math.random() * 9);
-    answer = a * b;
-    text = `${a} \u00D7 ${b}`;
-  } else {
-    b = 1 + Math.floor(Math.random() * 9);
-    const q = 1 + Math.floor(Math.random() * 9);
-    a = b * q;
-    answer = q;
-    text = `${a} \u00F7 ${b}`;
+function getCursorsPixels() {
+  const cursors = [];
+  if (calib && calib.identity && calib.rect) {
+    const lp = rawTracked[calib.identity.left];
+    const rp = rawTracked[calib.identity.right];
+    if (lp) { const s = mapToScreen(lp); cursors.push({ id: "L", px: s.x * canvas.width, py: s.y * canvas.height }); }
+    if (rp) { const s = mapToScreen(rp); cursors.push({ id: "R", px: s.x * canvas.width, py: s.y * canvas.height }); }
   }
-  return { text, answer };
+  return cursors;
 }
 
-// =====================================================================
-// Game state
-// =====================================================================
-
-let player = null;
-let monsters = [];
-let plaques = [];
-let stageIndex = 0;
-let spawnedInStage = 0;
-let onScreenTarget = 0;
-let monsterIdCounter = 0;
-let fadeTimer = 0;
-let transformTimer = 0;
-let transformFrameIdx = 0;
-let wrongFlashTimer = 0;
-let actionButton = null; // { label, x, y, w, h, holdMs, occupant, onSelect }
-let recalibrateBtn = { holdMs: 0, occupant: null };
-
-function playerWidth() {
-  const img0 = ASSET_FRAMES.samurai[0];
-  const aspect = (img0 && img0.naturalWidth) ? img0.naturalWidth / img0.naturalHeight : 0.85;
-  return canvas.height * PLAYER_HEIGHT_FRAC * aspect;
+function pointInRect(px, py, box) {
+  return px >= box.x && px <= box.x + box.w && py >= box.y && py <= box.y + box.h;
 }
-function engageX() {
-  return canvas.width * PLAYER_X_FRAC + playerWidth() * 0.9;
-}
-
-function initGameState() {
-  player = {
-    hp: PLAYER_HP_MAX,
-    hpMax: PLAYER_HP_MAX,
-    animMode: "idle",       // "idle" | "attack"
-    frameIdx: 0,
-    frameTimer: 0,
-    hitFlash: 0,
-  };
-  monsters = [];
-  plaques = [];
-  stageIndex = 0;
-  spawnedInStage = 0;
-  onScreenTarget = 0;
-  wrongFlashTimer = 0;
-}
-
-function currentStage() { return STAGES[stageIndex]; }
-
-function spawnMonster(stage) {
-  const frames = ASSET_FRAMES[stage.prefix];
-  const img0 = frames[0];
-  const aspect = (img0 && img0.naturalWidth) ? img0.naturalWidth / img0.naturalHeight : 1;
-  const height = canvas.height * stage.heightFrac;
-  const width = height * aspect;
-  monsters.push({
-    id: monsterIdCounter++,
-    type: stage.type,
-    prefix: stage.prefix,
-    frameCount: ASSET_MANIFEST[stage.prefix],
-    frameMs: stage.frameMs,
-    frameIdx: Math.floor(Math.random() * ASSET_MANIFEST[stage.prefix]),
-    frameTimer: 0,
-    hp: stage.hpMax,
-    hpMax: stage.hpMax,
-    dmgPct: stage.dmgPct,
-    atkDmg: stage.atk,
-    width, height,
-    x: canvas.width * 1.08,
-    targetX: 0,
-    state: "approaching",
-    attackTimer: 0,
-    hitTimer: 0,
-    question: generateQuestion(),
-  });
-  refreshPlaques();
-}
-
-function updateSpawning(dtMs) {
-  const stage = currentStage();
-  if (!stage) return; // level clear already handled elsewhere
-
-  if (monsters.length === 0 && onScreenTarget === 0 && spawnedInStage < stage.count) {
-    onScreenTarget = Math.min(1 + Math.floor(Math.random() * 4), stage.count - spawnedInStage);
-  }
-
-  while (monsters.length < onScreenTarget && spawnedInStage < stage.count) {
-    spawnMonster(stage);
-    spawnedInStage++;
-  }
-
-  if (monsters.length === 0 && spawnedInStage >= stage.count) {
-    stageIndex++;
-    spawnedInStage = 0;
-    onScreenTarget = 0;
-    if (stageIndex >= STAGES.length) {
-      enterLevelClear();
-    }
-  }
-}
-
-function updateMonsters(dtMs) {
-  // Recompute each monster's queue target position, front-to-back. Spacing
-  // is anchored to the monster ahead's CURRENT position (not its target),
-  // so a monster that's stunned/lagging behind its own target can never be
-  // overlapped by the one behind it.
-  for (let i = 0; i < monsters.length; i++) {
-    const m = monsters[i];
-    if (i === 0) {
-      m.targetX = engageX();
-    } else {
-      const prev = monsters[i - 1];
-      m.targetX = prev.x + prev.width * 0.55 + m.width * 0.55 + canvas.width * QUEUE_PADDING_FRAC;
-    }
-  }
-
-  // Constant crawl speed: whatever distance the FRONT slot currently covers
-  // (spawn point to engage point) takes MONSTER_TRAVEL_MS to cross if never
-  // interrupted. Recomputed every frame so it stays correct if the window
-  // is resized. Queued monsters use the same speed, so they naturally take
-  // less time since they have less distance to close.
-  const speedPxPerMs = Math.max(0, (canvas.width * 1.08 - engageX())) / MONSTER_TRAVEL_MS;
-
-  for (let i = 0; i < monsters.length; i++) {
-    const m = monsters[i];
-
-    if (m.hitTimer > 0) {
-      // Frozen: stunned by a hit. No movement, no walk-cycle advance, no
-      // attacking - just count down the stun while the tremble/red-tint
-      // render effect (handled in drawMonster) plays.
-      m.hitTimer -= dtMs;
-      if (m.hitTimer < 0) m.hitTimer = 0;
-      continue;
-    }
-
-    const desiredX = m.x - speedPxPerMs * dtMs;
-    m.x = Math.max(desiredX, m.targetX);
-
-    m.frameTimer += dtMs;
-    if (m.frameTimer >= m.frameMs) {
-      m.frameTimer -= m.frameMs;
-      m.frameIdx = (m.frameIdx + 1) % m.frameCount;
-    }
-
-    if (i === 0 && Math.abs(m.x - m.targetX) < 3) {
-      m.state = "engaging";
-      m.attackTimer += dtMs;
-      if (m.attackTimer >= ATTACK_INTERVAL_MS) {
-        m.attackTimer = 0;
-        player.hp = Math.max(0, player.hp - m.atkDmg);
-        player.hitFlash = 250;
-        if (player.hp <= 0) enterDying();
-      }
-    } else {
-      m.state = "approaching";
-    }
-  }
-}
-
-// ---------------------------------------------------------------------
-// Plaques
-// ---------------------------------------------------------------------
 
 function shuffle(arr) {
   for (let i = arr.length - 1; i > 0; i--) {
@@ -493,18 +349,20 @@ function shuffle(arr) {
   return arr;
 }
 
-function refreshPlaques() {
-  if (monsters.length === 0) return;
-  const frontAnswer = monsters[0].question.answer;
-  const distinctAnswers = [...new Set(monsters.map(m => m.question.answer))];
+let plaques = [];
+let wrongFlashTimer = 0;
+
+// answersInOrder[0] is treated as the one that MUST be answerable right now
+// (the frontmost monster, or the active fireball) - guaranteed a slot.
+function refreshPlaquesFromAnswers(answersInOrder) {
+  if (!answersInOrder || answersInOrder.length === 0) { plaques = []; return; }
+  const frontAnswer = answersInOrder[0];
+  const distinctAnswers = [...new Set(answersInOrder)];
   const correctPool = [frontAnswer, ...distinctAnswers.filter(a => a !== frontAnswer)];
 
   const correctSlots = [];
   let idx = 0;
-  while (correctSlots.length < 6) {
-    correctSlots.push(correctPool[idx % correctPool.length]);
-    idx++;
-  }
+  while (correctSlots.length < 6) { correctSlots.push(correctPool[idx % correctPool.length]); idx++; }
 
   const decoys = [];
   let guard = 0;
@@ -513,7 +371,7 @@ function refreshPlaques() {
     const candidate = 1 + Math.floor(Math.random() * 98);
     if (!distinctAnswers.includes(candidate) && !decoys.includes(candidate)) decoys.push(candidate);
   }
-  while (decoys.length < 4) decoys.push(1 + Math.floor(Math.random() * 98)); // fallback if guard exhausted
+  while (decoys.length < 4) decoys.push(1 + Math.floor(Math.random() * 98));
 
   const values = shuffle([...correctSlots, ...decoys]);
   plaques = values.map(v => ({ value: v, occupant: null, holdMs: 0 }));
@@ -528,339 +386,25 @@ function plaqueLayout() {
   const x0 = canvas.width * 0.04;
   const y = canvas.height * 0.90;
   const boxes = [];
-  for (let i = 0; i < n; i++) {
-    boxes.push({ x: x0 + i * (w + gap), y: y - h / 2, w, h });
-  }
+  for (let i = 0; i < n; i++) boxes.push({ x: x0 + i * (w + gap), y: y - h / 2, w, h });
   return boxes;
 }
 
-function pointInRect(px, py, box) {
-  return px >= box.x && px <= box.x + box.w && py >= box.y && py <= box.y + box.h;
-}
-
-function getCursorsPixels() {
-  const cursors = [];
-  if (calib && calib.identity && calib.rect) {
-    const lp = rawTracked[calib.identity.left];
-    const rp = rawTracked[calib.identity.right];
-    if (lp) { const s = mapToScreen(lp); cursors.push({ id: "L", px: s.x * canvas.width, py: s.y * canvas.height }); }
-    if (rp) { const s = mapToScreen(rp); cursors.push({ id: "R", px: s.x * canvas.width, py: s.y * canvas.height }); }
-  }
-  return cursors;
-}
-
-function onPlaqueSelected(value) {
-  if (monsters.length === 0) return;
-  const front = monsters[0];
-  if (value === front.question.answer) {
-    const dmg = Math.round(front.hpMax * front.dmgPct);
-    front.hp = Math.max(0, front.hp - dmg);
-    front.hitTimer = HIT_STUN_MS;
-    triggerPlayerAttack();
-    if (front.hp <= 0) {
-      monsters.shift();
-      refreshPlaques();
-    }
-  } else {
-    wrongFlashTimer = 250;
-  }
-}
-
-function updatePlaques(dtMs, cursors) {
-  if (mode !== "playing" || monsters.length === 0) return;
+function updatePlaquesGeneric(dtMs, cursors, onSelect) {
   const layout = plaqueLayout();
   for (let i = 0; i < plaques.length; i++) {
     const p = plaques[i];
     const box = layout[i];
     let occ = null;
-    for (const c of cursors) {
-      if (pointInRect(c.px, c.py, box)) { occ = c.id; break; }
-    }
+    for (const c of cursors) if (pointInRect(c.px, c.py, box)) { occ = c.id; break; }
     if (occ && occ === p.occupant) p.holdMs += dtMs;
     else { p.occupant = occ; p.holdMs = occ ? dtMs : 0; }
 
     if (p.holdMs >= HOVER_MS) {
-      onPlaqueSelected(p.value);
+      onSelect(p.value);
       for (const pp of plaques) { pp.holdMs = 0; pp.occupant = null; }
       break;
     }
-  }
-}
-
-// ---------------------------------------------------------------------
-// Player animation
-// ---------------------------------------------------------------------
-
-const PLAYER_IDLE_FRAMES = [0, 1, 2, 3];
-const PLAYER_ATTACK_FRAMES = [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
-const PLAYER_IDLE_FRAME_MS = 160;
-const PLAYER_ATTACK_FRAME_MS = 70;
-
-function triggerPlayerAttack() {
-  player.animMode = "attack";
-  player.frameIdx = 0;
-  player.frameTimer = 0;
-}
-
-function updatePlayerAnim(dtMs) {
-  if (player.hitFlash > 0) player.hitFlash -= dtMs;
-  player.frameTimer += dtMs;
-  if (player.animMode === "idle") {
-    const ms = PLAYER_IDLE_FRAME_MS;
-    if (player.frameTimer >= ms) {
-      player.frameTimer -= ms;
-      player.frameIdx = (player.frameIdx + 1) % PLAYER_IDLE_FRAMES.length;
-    }
-  } else {
-    const ms = PLAYER_ATTACK_FRAME_MS;
-    if (player.frameTimer >= ms) {
-      player.frameTimer -= ms;
-      player.frameIdx++;
-      if (player.frameIdx >= PLAYER_ATTACK_FRAMES.length) {
-        player.animMode = "idle";
-        player.frameIdx = 0;
-        player.frameTimer = 0;
-      }
-    }
-  }
-}
-
-function currentPlayerFrameImage() {
-  const list = player.animMode === "idle" ? PLAYER_IDLE_FRAMES : PLAYER_ATTACK_FRAMES;
-  const idx = list[Math.min(player.frameIdx, list.length - 1)];
-  return ASSET_FRAMES.samurai[idx];
-}
-
-// ---------------------------------------------------------------------
-// Mode transitions
-// ---------------------------------------------------------------------
-
-function enterStartPrompt() {
-  mode = "start_prompt";
-  actionButton = makeActionButton("Start", () => {
-    initGameState();
-    mode = "playing";
-  });
-}
-
-function enterDying() {
-  mode = "dying";
-  fadeTimer = 0;
-}
-
-function enterTransformAnim() {
-  mode = "transform_anim";
-  transformTimer = 0;
-  transformFrameIdx = 0;
-}
-
-function enterRetryPrompt() {
-  mode = "retry_prompt";
-  actionButton = makeActionButton("Retry", () => {
-    initGameState();
-    mode = "playing";
-  });
-}
-
-function enterLevelClear() {
-  mode = "level_clear";
-  actionButton = makeActionButton("Play Again", () => {
-    initGameState();
-    mode = "playing";
-  });
-}
-
-function makeActionButton(label, onSelect) {
-  const w = canvas.width * 0.22;
-  const h = canvas.height * 0.12;
-  return {
-    label,
-    x: canvas.width / 2 - w / 2,
-    y: canvas.height * 0.62,
-    w, h,
-    holdMs: 0, occupant: null,
-    onSelect,
-  };
-}
-
-function updateActionButton(dtMs, cursors) {
-  if (!actionButton) return;
-  let occ = null;
-  for (const c of cursors) {
-    if (pointInRect(c.px, c.py, actionButton)) { occ = c.id; break; }
-  }
-  if (occ && occ === actionButton.occupant) actionButton.holdMs += dtMs;
-  else { actionButton.occupant = occ; actionButton.holdMs = occ ? dtMs : 0; }
-
-  if (actionButton.holdMs >= HOVER_MS) {
-    const cb = actionButton.onSelect;
-    actionButton = null;
-    cb();
-  }
-}
-
-function recalibrateBox() {
-  const w = canvas.width * 0.11, h = canvas.height * 0.08;
-  return { x: canvas.width - w - 16, y: 16, w, h };
-}
-
-function updateRecalibrateButton(dtMs, cursors) {
-  const box = recalibrateBox();
-  let occ = null;
-  for (const c of cursors) if (pointInRect(c.px, c.py, box)) { occ = c.id; break; }
-  if (occ && occ === recalibrateBtn.occupant) recalibrateBtn.holdMs += dtMs;
-  else { recalibrateBtn.occupant = occ; recalibrateBtn.holdMs = occ ? dtMs : 0; }
-  if (recalibrateBtn.holdMs >= HOVER_MS) {
-    recalibrateBtn.holdMs = 0; recalibrateBtn.occupant = null;
-    resetCalibration();
-    mode = "calibrating";
-  }
-}
-
-// ---------------------------------------------------------------------
-// Manual mouse-click fallback (for testing without a phone)
-// ---------------------------------------------------------------------
-canvas.addEventListener("click", (e) => {
-  const rect = canvas.getBoundingClientRect();
-  const px = e.clientX - rect.left;
-  const py = e.clientY - rect.top;
-
-  if (mode === "playing" && monsters.length > 0) {
-    const layout = plaqueLayout();
-    for (let i = 0; i < plaques.length; i++) {
-      if (pointInRect(px, py, layout[i])) { onPlaqueSelected(plaques[i].value); return; }
-    }
-    const rbox = recalibrateBox();
-    if (pointInRect(px, py, rbox)) {
-      resetCalibration();
-      mode = "calibrating";
-      return;
-    }
-  }
-  if (actionButton && pointInRect(px, py, actionButton)) {
-    const cb = actionButton.onSelect;
-    actionButton = null;
-    cb();
-  }
-});
-
-// =====================================================================
-// Rendering helpers
-// =====================================================================
-
-function drawBackground() {
-  if (!backgroundImg) { ctx.fillStyle = "#0d1117"; ctx.fillRect(0,0,canvas.width,canvas.height); return; }
-  const cw = canvas.width, ch = canvas.height;
-  const iw = backgroundImg.naturalWidth, ih = backgroundImg.naturalHeight;
-  const scale = Math.max(cw / iw, ch / ih);
-  const dw = iw * scale, dh = ih * scale;
-  ctx.drawImage(backgroundImg, (cw - dw) / 2, (ch - dh) / 2, dw, dh);
-}
-
-function drawHandCursor(rawPoint, color, label) {
-  if (!rawPoint || !calib || !calib.rect) return;
-  const s = mapToScreen(rawPoint);
-  const x = s.x * canvas.width, y = s.y * canvas.height;
-  ctx.beginPath();
-  ctx.arc(x, y, 28, 0, Math.PI * 2);
-  ctx.fillStyle = color;
-  ctx.globalAlpha = 0.85;
-  ctx.fill();
-  ctx.globalAlpha = 1;
-  if (label) {
-    ctx.font = "14px sans-serif";
-    ctx.fillStyle = "#fff";
-    ctx.textAlign = "center";
-    ctx.fillText(label, x, y - 36);
-  }
-}
-
-function drawCalibBox(boxCenterNorm, label, holdMs, occupied) {
-  const scale = Math.min(canvas.width, canvas.height);
-  const x = boxCenterNorm.x * canvas.width, y = boxCenterNorm.y * canvas.height;
-  const r = BOX_RADIUS * scale;
-  ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2);
-  ctx.strokeStyle = occupied ? "#2ecc71" : "#8b949e"; ctx.lineWidth = 4; ctx.stroke();
-  const pct = Math.min(1, holdMs / CALIB_HOLD_MS);
-  if (pct > 0) {
-    ctx.beginPath();
-    ctx.arc(x, y, r - 8, -Math.PI/2, -Math.PI/2 + pct * Math.PI * 2);
-    ctx.strokeStyle = "#58a6ff"; ctx.lineWidth = 6; ctx.stroke();
-  }
-  ctx.font = "18px sans-serif"; ctx.fillStyle = "#fff"; ctx.textAlign = "center";
-  ctx.fillText(label, x, y + r + 26);
-}
-
-function drawPlayer() {
-  const img = currentPlayerFrameImage();
-  if (!img || !img.naturalWidth) return;
-  const h = canvas.height * PLAYER_HEIGHT_FRAC;
-  const w = h * (img.naturalWidth / img.naturalHeight);
-  const x = canvas.width * PLAYER_X_FRAC - w / 2;
-  const y = canvas.height * GROUND_Y_FRAC - h;
-
-  if (player.hitFlash > 0) {
-    ctx.save();
-    ctx.filter = "brightness(1.8) saturate(2) hue-rotate(-20deg)";
-    ctx.drawImage(img, x, y, w, h);
-    ctx.restore();
-  } else {
-    ctx.drawImage(img, x, y, w, h);
-  }
-}
-
-function drawHpBar(x, y, w, h, ratio) {
-  ctx.fillStyle = "rgba(0,0,0,0.5)";
-  ctx.fillRect(x, y, w, h);
-  ctx.fillStyle = ratio > 0.4 ? "#2ecc71" : (ratio > 0.15 ? "#f1c40f" : "#e74c3c");
-  ctx.fillRect(x, y, w * Math.max(0, ratio), h);
-  ctx.strokeStyle = "#fff"; ctx.lineWidth = 1.5;
-  ctx.strokeRect(x, y, w, h);
-}
-
-function drawMonster(m, isFront) {
-  const frames = ASSET_FRAMES[m.prefix];
-  const img = frames && frames[m.frameIdx];
-  const x = m.x - m.width / 2;
-  const y = canvas.height * GROUND_Y_FRAC - m.height;
-
-  if (img && img.naturalWidth) {
-    if (m.hitTimer > 0) {
-      // Tremble: a quick decaying shake while stunned.
-      const stunPct = m.hitTimer / HIT_STUN_MS; // 1 -> 0 over the stun duration
-      const shakeAmount = 6 * stunPct;
-      const shakeX = Math.sin(m.hitTimer * 0.09) * shakeAmount;
-      const shakeY = Math.cos(m.hitTimer * 0.13) * shakeAmount * 0.4;
-
-      ctx.drawImage(img, x + shakeX, y + shakeY, m.width, m.height);
-
-      // Reddish shade, tinting only the sprite's own drawn pixels (not its
-      // transparent surroundings), fading out as the stun wears off.
-      ctx.save();
-      ctx.globalCompositeOperation = "source-atop";
-      ctx.fillStyle = `rgba(220, 20, 20, ${0.55 * stunPct})`;
-      ctx.fillRect(x + shakeX, y + shakeY, m.width, m.height);
-      ctx.restore();
-    } else {
-      ctx.drawImage(img, x, y, m.width, m.height);
-    }
-  }
-
-  // HP bar + question
-  const barW = Math.max(70, m.width * 0.9);
-  const barX = m.x - barW / 2;
-  const barY = y - 34;
-  drawHpBar(barX, barY, barW, 10, m.hp / m.hpMax);
-
-  ctx.font = `bold ${Math.max(16, Math.round(canvas.height * 0.024))}px sans-serif`;
-  ctx.textAlign = "center";
-  ctx.fillStyle = isFront ? "#ffe066" : "#ffffff";
-  ctx.fillText(m.question.text, m.x, barY - 10);
-
-  if (isFront) {
-    ctx.fillStyle = "#ffe066";
-    ctx.font = "20px sans-serif";
-    ctx.fillText("\u25BC", m.x, barY - 34 - Math.round(canvas.height*0.024));
   }
 }
 
@@ -872,11 +416,9 @@ function drawPlaques() {
     const cx = box.x + box.w / 2;
 
     ctx.fillStyle = "#6b4226";
-    roundRect(box.x, box.y, box.w, box.h, 6);
-    ctx.fill();
+    roundRect(box.x, box.y, box.w, box.h, 6); ctx.fill();
     ctx.strokeStyle = "#3e2412"; ctx.lineWidth = 3;
-    roundRect(box.x, box.y, box.w, box.h, 6);
-    ctx.stroke();
+    roundRect(box.x, box.y, box.w, box.h, 6); ctx.stroke();
 
     ctx.fillStyle = "#1a1a1a";
     ctx.font = `bold ${Math.max(16, Math.round(box.w * 0.4))}px sans-serif`;
@@ -901,23 +443,72 @@ function roundRect(x, y, w, h, r) {
   ctx.closePath();
 }
 
-function drawActionButton() {
-  if (!actionButton) return;
-  const b = actionButton;
-  ctx.fillStyle = "#6b4226";
-  roundRect(b.x, b.y, b.w, b.h, 12); ctx.fill();
-  ctx.strokeStyle = "#3e2412"; ctx.lineWidth = 4;
-  roundRect(b.x, b.y, b.w, b.h, 12); ctx.stroke();
+// --- Generalized action buttons (1 or more hoverable buttons at once) ---
 
-  ctx.fillStyle = "#fff";
-  ctx.font = `bold ${Math.round(b.h * 0.34)}px sans-serif`;
-  ctx.textAlign = "center";
-  ctx.fillText(b.label, b.x + b.w / 2, b.y + b.h * 0.58);
+let actionButtons = [];
 
-  const pct = Math.min(1, b.holdMs / HOVER_MS);
-  if (pct > 0) {
-    ctx.fillStyle = "rgba(88,166,255,0.5)";
-    ctx.fillRect(b.x, b.y + b.h * (1 - pct), b.w, b.h * pct);
+function makeActionButtons(items) {
+  const w = canvas.width * 0.20, h = canvas.height * 0.11, gap = canvas.width * 0.03;
+  const totalW = items.length * w + (items.length - 1) * gap;
+  const x0 = canvas.width / 2 - totalW / 2;
+  const y = canvas.height * 0.62;
+  return items.map((it, i) => ({
+    label: it.label, onSelect: it.onSelect,
+    x: x0 + i * (w + gap), y, w, h, holdMs: 0, occupant: null,
+  }));
+}
+
+function updateActionButtons(dtMs, cursors) {
+  for (const b of actionButtons) {
+    let occ = null;
+    for (const c of cursors) if (pointInRect(c.px, c.py, b)) { occ = c.id; break; }
+    if (occ && occ === b.occupant) b.holdMs += dtMs;
+    else { b.occupant = occ; b.holdMs = occ ? dtMs : 0; }
+    if (b.holdMs >= HOVER_MS) {
+      const cb = b.onSelect;
+      actionButtons = [];
+      cb();
+      return;
+    }
+  }
+}
+
+function drawActionButtons() {
+  for (const b of actionButtons) {
+    ctx.fillStyle = "#6b4226";
+    roundRect(b.x, b.y, b.w, b.h, 12); ctx.fill();
+    ctx.strokeStyle = "#3e2412"; ctx.lineWidth = 4;
+    roundRect(b.x, b.y, b.w, b.h, 12); ctx.stroke();
+
+    ctx.fillStyle = "#fff";
+    ctx.font = `bold ${Math.round(b.h * 0.30)}px sans-serif`;
+    ctx.textAlign = "center";
+    ctx.fillText(b.label, b.x + b.w / 2, b.y + b.h * 0.58);
+
+    const pct = Math.min(1, b.holdMs / HOVER_MS);
+    if (pct > 0) {
+      ctx.fillStyle = "rgba(88,166,255,0.5)";
+      ctx.fillRect(b.x, b.y + b.h * (1 - pct), b.w, b.h * pct);
+    }
+  }
+}
+
+function recalibrateBox() {
+  const w = canvas.width * 0.11, h = canvas.height * 0.08;
+  return { x: canvas.width - w - 16, y: 16, w, h };
+}
+let recalibrateBtn = { holdMs: 0, occupant: null };
+
+function updateRecalibrateButton(dtMs, cursors) {
+  const box = recalibrateBox();
+  let occ = null;
+  for (const c of cursors) if (pointInRect(c.px, c.py, box)) { occ = c.id; break; }
+  if (occ && occ === recalibrateBtn.occupant) recalibrateBtn.holdMs += dtMs;
+  else { recalibrateBtn.occupant = occ; recalibrateBtn.holdMs = occ ? dtMs : 0; }
+  if (recalibrateBtn.holdMs >= HOVER_MS) {
+    recalibrateBtn.holdMs = 0; recalibrateBtn.occupant = null;
+    resetCalibration();
+    mode = "calibrating";
   }
 }
 
@@ -938,7 +529,50 @@ function drawRecalibrateButton() {
   }
 }
 
-function drawPlayerHud() {
+function drawHandCursor(rawPoint, color, label) {
+  if (!rawPoint || !calib || !calib.rect) return;
+  const s = mapToScreen(rawPoint);
+  const x = s.x * canvas.width, y = s.y * canvas.height;
+  ctx.beginPath();
+  ctx.arc(x, y, 28, 0, Math.PI * 2);
+  ctx.fillStyle = color;
+  ctx.globalAlpha = 0.85;
+  ctx.fill();
+  ctx.globalAlpha = 1;
+  if (label) {
+    ctx.font = "14px sans-serif";
+    ctx.fillStyle = "#fff";
+    ctx.textAlign = "center";
+    ctx.fillText(label, x, y - 36);
+  }
+}
+
+function drawHandCursors() {
+  if (calib && calib.identity) {
+    drawHandCursor(rawTracked[calib.identity.left], "#2ecc71");
+    drawHandCursor(rawTracked[calib.identity.right], "#e67e22");
+  }
+}
+
+function drawBackground() {
+  if (!backgroundImg) { ctx.fillStyle = "#0d1117"; ctx.fillRect(0,0,canvas.width,canvas.height); return; }
+  const cw = canvas.width, ch = canvas.height;
+  const iw = backgroundImg.naturalWidth, ih = backgroundImg.naturalHeight;
+  const scale = Math.max(cw / iw, ch / ih);
+  const dw = iw * scale, dh = ih * scale;
+  ctx.drawImage(backgroundImg, (cw - dw) / 2, (ch - dh) / 2, dw, dh);
+}
+
+function drawHpBar(x, y, w, h, ratio) {
+  ctx.fillStyle = "rgba(0,0,0,0.5)";
+  ctx.fillRect(x, y, w, h);
+  ctx.fillStyle = ratio > 0.4 ? "#2ecc71" : (ratio > 0.15 ? "#f1c40f" : "#e74c3c");
+  ctx.fillRect(x, y, w * Math.max(0, ratio), h);
+  ctx.strokeStyle = "#fff"; ctx.lineWidth = 1.5;
+  ctx.strokeRect(x, y, w, h);
+}
+
+function drawPlayerHud(extraLine) {
   const w = canvas.width * 0.22, h = canvas.height * 0.035;
   const x = 16, y = 16;
   drawHpBar(x, y, w, h, player.hp / player.hpMax);
@@ -947,13 +581,698 @@ function drawPlayerHud() {
   ctx.textAlign = "left";
   ctx.fillText(`HP ${player.hp}/${player.hpMax}`, x + 6, y + h - 4);
 
-  const stage = currentStage();
   ctx.textAlign = "center";
   ctx.font = `${Math.round(canvas.height*0.026)}px sans-serif`;
-  if (stage) {
-    ctx.fillText(`${stage.type.toUpperCase()}  ${spawnedInStage}/${stage.count}`, canvas.width/2, 30);
+  if (extraLine) ctx.fillText(extraLine, canvas.width/2, 30);
+}
+
+function drawCreditsHud() {
+  ctx.fillStyle = "#ffe066";
+  ctx.font = `bold ${Math.round(canvas.height*0.03)}px sans-serif`;
+  ctx.textAlign = "right";
+  ctx.fillText(`Credits: ${credits}`, canvas.width - 16, canvas.height*0.05);
+}
+
+// =====================================================================
+// Player (shared between both levels)
+// =====================================================================
+
+const GROUND_Y_FRAC = 0.84;
+const PLAYER_X_FRAC = 0.14;
+const PLAYER_HEIGHT_FRAC = 0.24;
+const PLAYER_HP_MAX = 100;
+
+const PLAYER_IDLE_FRAMES = [0, 1, 2, 3];
+const PLAYER_ATTACK_FRAMES = [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
+const PLAYER_IDLE_FRAME_MS = 160;
+const PLAYER_ATTACK_FRAME_MS = 70;
+
+let player = null;
+
+function newPlayer() {
+  return { hp: PLAYER_HP_MAX, hpMax: PLAYER_HP_MAX, animMode: "idle", frameIdx: 0, frameTimer: 0, hitFlash: 0 };
+}
+
+function playerWidth() {
+  const img0 = ASSET_FRAMES.samurai[0];
+  const aspect = (img0 && img0.naturalWidth) ? img0.naturalWidth / img0.naturalHeight : 0.85;
+  return canvas.height * PLAYER_HEIGHT_FRAC * aspect;
+}
+
+function triggerPlayerAttack() {
+  player.animMode = "attack";
+  player.frameIdx = 0;
+  player.frameTimer = 0;
+}
+
+function updatePlayerAnim(dtMs) {
+  if (player.hitFlash > 0) player.hitFlash -= dtMs;
+  player.frameTimer += dtMs;
+  if (player.animMode === "idle") {
+    if (player.frameTimer >= PLAYER_IDLE_FRAME_MS) {
+      player.frameTimer -= PLAYER_IDLE_FRAME_MS;
+      player.frameIdx = (player.frameIdx + 1) % PLAYER_IDLE_FRAMES.length;
+    }
+  } else {
+    if (player.frameTimer >= PLAYER_ATTACK_FRAME_MS) {
+      player.frameTimer -= PLAYER_ATTACK_FRAME_MS;
+      player.frameIdx++;
+      if (player.frameIdx >= PLAYER_ATTACK_FRAMES.length) {
+        player.animMode = "idle"; player.frameIdx = 0; player.frameTimer = 0;
+      }
+    }
   }
 }
+
+function currentPlayerFrameImage() {
+  const list = player.animMode === "idle" ? PLAYER_IDLE_FRAMES : PLAYER_ATTACK_FRAMES;
+  const idx = list[Math.min(player.frameIdx, list.length - 1)];
+  return ASSET_FRAMES.samurai[idx];
+}
+
+function drawPlayer(opts) {
+  const dim = opts && opts.dim;
+  const img = currentPlayerFrameImage();
+  if (!img || !img.naturalWidth) return;
+  const h = canvas.height * PLAYER_HEIGHT_FRAC;
+  const w = h * (img.naturalWidth / img.naturalHeight);
+  const x = canvas.width * PLAYER_X_FRAC - w / 2;
+  const y = canvas.height * GROUND_Y_FRAC - h;
+
+  ctx.save();
+  if (dim) ctx.globalAlpha = 0.45;
+  if (player.hitFlash > 0) ctx.filter = "brightness(1.8) saturate(2) hue-rotate(-20deg)";
+  ctx.drawImage(img, x, y, w, h);
+  ctx.restore();
+}
+
+// =====================================================================
+// Math question generation
+// =====================================================================
+
+function generateQuestion() {
+  const ops = ["+", "-", "*", "/"];
+  const op = ops[Math.floor(Math.random() * ops.length)];
+  let a, b, answer, text;
+  if (op === "+") {
+    a = 1 + Math.floor(Math.random() * 99);
+    b = 1 + Math.floor(Math.random() * 99);
+    answer = a + b; text = `${a} + ${b}`;
+  } else if (op === "-") {
+    a = 1 + Math.floor(Math.random() * 99);
+    b = 1 + Math.floor(Math.random() * 99);
+    if (b > a) [a, b] = [b, a];
+    answer = a - b; text = `${a} - ${b}`;
+  } else if (op === "*") {
+    a = 1 + Math.floor(Math.random() * 9);
+    b = 1 + Math.floor(Math.random() * 9);
+    answer = a * b; text = `${a} \u00D7 ${b}`;
+  } else {
+    b = 1 + Math.floor(Math.random() * 9);
+    const q = 1 + Math.floor(Math.random() * 9);
+    a = b * q; answer = q; text = `${a} \u00F7 ${b}`;
+  }
+  return { text, answer };
+}
+
+// =====================================================================
+// HUB (level selector + shop entry)
+// =====================================================================
+
+function initHub() {
+  actionButtons = makeActionButtons([
+    { label: "Level 1", onSelect: () => startLevel1() },
+    { label: "Level 2", onSelect: () => startLevel2Intro() },
+    { label: "Shop", onSelect: () => enterShop() },
+  ]);
+}
+
+function drawHub(cursors, dtMs) {
+  drawBackground();
+  ctx.fillStyle = "rgba(0,0,0,0.35)";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  ctx.fillStyle = "#fff";
+  ctx.font = "bold 44px sans-serif";
+  ctx.textAlign = "center";
+  ctx.fillText("Samurai Math Quest", canvas.width/2, canvas.height*0.28);
+  drawCreditsHud();
+  updateActionButtons(dtMs, cursors);
+  drawActionButtons();
+  updateRecalibrateButton(dtMs, cursors);
+  drawRecalibrateButton();
+  drawHandCursors();
+}
+
+// =====================================================================
+// SHOP
+// =====================================================================
+
+let shopHold = [];
+let shopMessage = "";
+let shopMessageTimer = 0;
+
+function enterShop() {
+  mode = "shop";
+  shopHold = SWORDS.map(() => ({ holdMs: 0, occupant: null }));
+  shopMessage = ""; shopMessageTimer = 0;
+  actionButtons = makeActionButtons([{ label: "Back to Menu", onSelect: () => { mode = "hub"; initHub(); } }]);
+  // Move the back button below the shop grid rather than the default mid-screen spot.
+  for (const b of actionButtons) { b.y = canvas.height * 0.90; b.w = canvas.width*0.18; b.h = canvas.height*0.07; b.x = canvas.width/2 - b.w/2; }
+}
+
+function shopLayout() {
+  const cols = 3;
+  const cardW = canvas.width * 0.16, cardH = canvas.height * 0.28;
+  const totalW = cols * cardW;
+  const gapX = (canvas.width * 0.85 - totalW) / (cols - 1);
+  const gapY = canvas.height * 0.04;
+  const x0 = canvas.width * 0.075;
+  const y0 = canvas.height * 0.14;
+  const boxes = [];
+  for (let i = 0; i < SWORDS.length; i++) {
+    const r = Math.floor(i / cols), c = i % cols;
+    boxes.push({ x: x0 + c * (cardW + gapX), y: y0 + r * (cardH + gapY), w: cardW, h: cardH });
+  }
+  return boxes;
+}
+
+function buySwordAt(i) {
+  const sw = SWORDS[i];
+  if (ownedSwords.includes(sw.id)) {
+    equippedSword = sw.id; saveEquippedSword();
+  } else if (credits >= sw.price) {
+    credits -= sw.price; ownedSwords.push(sw.id); equippedSword = sw.id;
+    saveCredits(); saveOwnedSwords(); saveEquippedSword();
+  } else {
+    shopMessage = "Not enough credits!"; shopMessageTimer = 1500;
+  }
+}
+
+function updateShop(dtMs, cursors) {
+  const layout = shopLayout();
+  for (let i = 0; i < SWORDS.length; i++) {
+    const box = layout[i];
+    const hold = shopHold[i];
+    let occ = null;
+    for (const c of cursors) if (pointInRect(c.px, c.py, box)) { occ = c.id; break; }
+    if (occ && occ === hold.occupant) hold.holdMs += dtMs;
+    else { hold.occupant = occ; hold.holdMs = occ ? dtMs : 0; }
+    if (hold.holdMs >= SHOP_HOVER_MS) {
+      buySwordAt(i);
+      for (const h of shopHold) { h.holdMs = 0; h.occupant = null; }
+      break;
+    }
+  }
+  if (shopMessageTimer > 0) shopMessageTimer -= dtMs;
+  updateActionButtons(dtMs, cursors);
+}
+
+function drawShop(cursors, dtMs) {
+  drawBackground();
+  ctx.fillStyle = "rgba(0,0,0,0.45)";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  ctx.fillStyle = "#fff";
+  ctx.font = "bold 34px sans-serif";
+  ctx.textAlign = "center";
+  ctx.fillText("Sword Shop - hover 5 seconds to buy/equip", canvas.width/2, canvas.height*0.08);
+  drawCreditsHud();
+
+  const layout = shopLayout();
+  for (let i = 0; i < SWORDS.length; i++) {
+    const sw = SWORDS[i];
+    const box = layout[i];
+    const hold = shopHold[i];
+    const owned = ownedSwords.includes(sw.id);
+    const equipped = equippedSword === sw.id;
+
+    ctx.fillStyle = equipped ? "rgba(46,204,113,0.18)" : "rgba(40,40,45,0.85)";
+    roundRect(box.x, box.y, box.w, box.h, 10); ctx.fill();
+    ctx.strokeStyle = equipped ? "#2ecc71" : "#888"; ctx.lineWidth = 2;
+    roundRect(box.x, box.y, box.w, box.h, 10); ctx.stroke();
+
+    // Growing glow while hovered
+    const pct = Math.min(1, hold.holdMs / SHOP_HOVER_MS);
+    if (pct > 0) {
+      ctx.save();
+      ctx.shadowColor = "rgba(255,215,0,0.95)";
+      ctx.shadowBlur = 30 * pct;
+      ctx.strokeStyle = "gold";
+      ctx.lineWidth = 3 + 6 * pct;
+      roundRect(box.x, box.y, box.w, box.h, 10); ctx.stroke();
+      ctx.restore();
+    }
+
+    const iconImg = sw.icon ? SINGLE_ASSETS[sw.icon] : null;
+    const iconAreaH = box.h * 0.62;
+    if (iconImg && iconImg.naturalWidth) {
+      const ih = iconAreaH, iw = ih * (iconImg.naturalWidth / iconImg.naturalHeight);
+      ctx.drawImage(iconImg, box.x + box.w/2 - iw/2, box.y + box.h*0.06, iw, ih);
+    } else {
+      ctx.fillStyle = "#ccc";
+      ctx.font = `${Math.round(box.w*0.4)}px sans-serif`;
+      ctx.textAlign = "center";
+      ctx.fillText("\u2694\uFE0F", box.x + box.w/2, box.y + iconAreaH*0.7);
+    }
+
+    ctx.fillStyle = "#fff";
+    ctx.font = `bold ${Math.round(box.w*0.11)}px sans-serif`;
+    ctx.textAlign = "center";
+    ctx.fillText(sw.name, box.x + box.w/2, box.y + box.h*0.78);
+
+    ctx.font = `${Math.round(box.w*0.09)}px sans-serif`;
+    ctx.fillStyle = "#ffe066";
+    ctx.fillText(`ATK \u00D7${sw.mult.toFixed(2)}`, box.x + box.w/2, box.y + box.h*0.88);
+
+    ctx.fillStyle = equipped ? "#2ecc71" : (owned ? "#9cdcfe" : "#fff");
+    ctx.font = `bold ${Math.round(box.w*0.09)}px sans-serif`;
+    const statusText = equipped ? "EQUIPPED" : (owned ? "Owned - hover to equip" : `${sw.price} credits`);
+    ctx.fillText(statusText, box.x + box.w/2, box.y + box.h*0.98);
+  }
+
+  if (shopMessageTimer > 0) {
+    ctx.fillStyle = "#e74c3c";
+    ctx.font = "bold 26px sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText(shopMessage, canvas.width/2, canvas.height*0.10);
+  }
+
+  drawActionButtons();
+  drawHandCursors();
+}
+
+// =====================================================================
+// LEVEL 1 (zombies -> onis -> fenrir)
+// =====================================================================
+
+const QUEUE_PADDING_FRAC = 0.03;
+const ATTACK_INTERVAL_MS = 1500;
+const MONSTER_TRAVEL_MS = 15000;
+const HIT_STUN_MS = 1000;
+
+const STAGES = [
+  { type: "zombie", count: 15, hpMax: 100, dmgPct: 0.25, atk: 4,  heightFrac: 0.22, prefix: "zombie", frameMs: 80 },
+  { type: "oni",     count: 2,  hpMax: 200, dmgPct: 0.15, atk: 8,  heightFrac: 0.44, prefix: "oni",     frameMs: 80 },
+  { type: "fenrir",  count: 1,  hpMax: 400, dmgPct: 0.06, atk: 14, heightFrac: 0.85, prefix: "fenrir",  frameMs: 80 },
+];
+
+let monsters = [];
+let stageIndex = 0;
+let spawnedInStage = 0;
+let onScreenTarget = 0;
+let monsterIdCounter = 0;
+
+function engageX() { return canvas.width * PLAYER_X_FRAC + playerWidth() * 0.9; }
+
+function startLevel1() {
+  currentLevel = "level1";
+  player = newPlayer();
+  monsters = []; plaques = [];
+  stageIndex = 0; spawnedInStage = 0; onScreenTarget = 0;
+  wrongFlashTimer = 0;
+  mode = "playing";
+}
+
+function currentStage() { return STAGES[stageIndex]; }
+
+function spawnMonster(stage) {
+  const frames = ASSET_FRAMES[stage.prefix];
+  const img0 = frames[0];
+  const aspect = (img0 && img0.naturalWidth) ? img0.naturalWidth / img0.naturalHeight : 1;
+  const height = canvas.height * stage.heightFrac;
+  const width = height * aspect;
+  monsters.push({
+    id: monsterIdCounter++,
+    type: stage.type, prefix: stage.prefix,
+    frameCount: ASSET_MANIFEST[stage.prefix], frameMs: stage.frameMs,
+    frameIdx: Math.floor(Math.random() * ASSET_MANIFEST[stage.prefix]), frameTimer: 0,
+    hp: stage.hpMax, hpMax: stage.hpMax, dmgPct: stage.dmgPct, atkDmg: stage.atk,
+    width, height, x: canvas.width * 1.08, targetX: 0,
+    state: "approaching", attackTimer: 0, hitTimer: 0,
+    question: generateQuestion(),
+  });
+  refreshPlaquesLevel1();
+}
+
+function refreshPlaquesLevel1() {
+  if (monsters.length === 0) return;
+  refreshPlaquesFromAnswers(monsters.map(m => m.question.answer));
+}
+
+function updateSpawning(dtMs) {
+  const stage = currentStage();
+  if (!stage) return;
+
+  if (monsters.length === 0 && onScreenTarget === 0 && spawnedInStage < stage.count) {
+    onScreenTarget = Math.min(1 + Math.floor(Math.random() * 4), stage.count - spawnedInStage);
+  }
+  while (monsters.length < onScreenTarget && spawnedInStage < stage.count) {
+    spawnMonster(stage);
+    spawnedInStage++;
+  }
+  if (monsters.length === 0 && spawnedInStage >= stage.count) {
+    stageIndex++; spawnedInStage = 0; onScreenTarget = 0;
+    if (stageIndex >= STAGES.length) enterLevelClear();
+  }
+}
+
+function updateMonsters(dtMs) {
+  for (let i = 0; i < monsters.length; i++) {
+    const m = monsters[i];
+    if (i === 0) m.targetX = engageX();
+    else {
+      const prev = monsters[i - 1];
+      m.targetX = prev.x + prev.width * 0.55 + m.width * 0.55 + canvas.width * QUEUE_PADDING_FRAC;
+    }
+  }
+
+  const speedPxPerMs = Math.max(0, (canvas.width * 1.08 - engageX())) / MONSTER_TRAVEL_MS;
+
+  for (let i = 0; i < monsters.length; i++) {
+    const m = monsters[i];
+    if (m.hitTimer > 0) {
+      m.hitTimer -= dtMs;
+      if (m.hitTimer < 0) m.hitTimer = 0;
+      continue;
+    }
+    const desiredX = m.x - speedPxPerMs * dtMs;
+    m.x = Math.max(desiredX, m.targetX);
+
+    m.frameTimer += dtMs;
+    if (m.frameTimer >= m.frameMs) { m.frameTimer -= m.frameMs; m.frameIdx = (m.frameIdx + 1) % m.frameCount; }
+
+    if (i === 0 && Math.abs(m.x - m.targetX) < 3) {
+      m.state = "engaging";
+      m.attackTimer += dtMs;
+      if (m.attackTimer >= ATTACK_INTERVAL_MS) {
+        m.attackTimer = 0;
+        player.hp = Math.max(0, player.hp - m.atkDmg);
+        player.hitFlash = 250;
+        if (player.hp <= 0) enterDying();
+      }
+    } else {
+      m.state = "approaching";
+    }
+  }
+}
+
+function onPlaqueSelectedLevel1(value) {
+  if (monsters.length === 0) return;
+  const front = monsters[0];
+  if (value === front.question.answer) {
+    const dmg = Math.round(front.hpMax * front.dmgPct * getDamageMultiplier());
+    front.hp = Math.max(0, front.hp - dmg);
+    front.hitTimer = HIT_STUN_MS;
+    triggerPlayerAttack();
+    if (front.hp <= 0) {
+      credits += (CREDIT_BY_TYPE[front.type] || 0); saveCredits();
+      monsters.shift();
+      refreshPlaquesLevel1();
+    }
+  } else {
+    wrongFlashTimer = 250;
+  }
+}
+
+function updatePlaquesLevel1(dtMs, cursors) {
+  if (mode !== "playing" || monsters.length === 0) return;
+  updatePlaquesGeneric(dtMs, cursors, onPlaqueSelectedLevel1);
+}
+
+function drawMonster(m, isFront) {
+  const frames = ASSET_FRAMES[m.prefix];
+  const img = frames && frames[m.frameIdx];
+  const x = m.x - m.width / 2;
+  const y = canvas.height * GROUND_Y_FRAC - m.height;
+
+  if (img && img.naturalWidth) {
+    if (m.hitTimer > 0) {
+      const stunPct = m.hitTimer / HIT_STUN_MS;
+      const shakeAmount = 6 * stunPct;
+      const shakeX = Math.sin(m.hitTimer * 0.09) * shakeAmount;
+      const shakeY = Math.cos(m.hitTimer * 0.13) * shakeAmount * 0.4;
+      ctx.drawImage(img, x + shakeX, y + shakeY, m.width, m.height);
+      ctx.save();
+      ctx.globalCompositeOperation = "source-atop";
+      ctx.fillStyle = `rgba(220, 20, 20, ${0.55 * stunPct})`;
+      ctx.fillRect(x + shakeX, y + shakeY, m.width, m.height);
+      ctx.restore();
+    } else {
+      ctx.drawImage(img, x, y, m.width, m.height);
+    }
+  }
+
+  const barW = Math.max(70, m.width * 0.9);
+  const barX = m.x - barW / 2;
+  const barY = y - 34;
+  drawHpBar(barX, barY, barW, 10, m.hp / m.hpMax);
+
+  ctx.font = `bold ${Math.max(16, Math.round(canvas.height * 0.024))}px sans-serif`;
+  ctx.textAlign = "center";
+  ctx.fillStyle = isFront ? "#ffe066" : "#ffffff";
+  ctx.fillText(m.question.text, m.x, barY - 10);
+
+  if (isFront) {
+    ctx.fillStyle = "#ffe066";
+    ctx.font = "20px sans-serif";
+    ctx.fillText("\u25BC", m.x, barY - 34 - Math.round(canvas.height*0.024));
+  }
+}
+
+function enterLevelClear() {
+  mode = "level_clear";
+  credits += LEVEL1_CLEAR_BONUS; saveCredits();
+  actionButtons = makeActionButtons([
+    { label: "Play Again", onSelect: () => startLevel1() },
+    { label: "Menu", onSelect: () => { mode = "hub"; initHub(); } },
+  ]);
+}
+
+// =====================================================================
+// Shared lose flow (dying -> transform_anim -> retry_prompt)
+// =====================================================================
+
+const FADE_MS = 900;
+const TRANSFORM_DISPLAY_MS = 1500;
+let fadeTimer = 0;
+let transformTimer = 0;
+let transformFrameIdx = 0;
+
+function enterDying() { mode = "dying"; fadeTimer = 0; }
+function enterTransformAnim() { mode = "transform_anim"; transformTimer = 0; transformFrameIdx = 0; }
+
+function enterRetryPrompt() {
+  mode = "retry_prompt";
+  actionButtons = makeActionButtons([
+    { label: "Retry", onSelect: () => { if (currentLevel === "level2") startLevel2Intro(); else startLevel1(); } },
+    { label: "Menu", onSelect: () => { mode = "hub"; initHub(); } },
+  ]);
+}
+
+// =====================================================================
+// LEVEL 2 - Oni-Oh boss gauntlet
+// =====================================================================
+
+const ONIOH_X_FRAC = 0.68;
+const ONIOH_Y_FRAC = 0.40;
+const ONIOH_HEIGHT_FRAC = 0.50;
+const LEVEL2_HIT_DAMAGE = 12;
+const DARK_LEAD_MS = 1500;
+const MASKON_TOTAL_MS = 5000;
+const REVEAL_MS = 1200;
+
+const ANIM_INFO = {
+  idle:      { prefix: "onioh_idle",      frameCount: 25, frameMs: 80, durationMs: 25*80, loop: true },
+  fireslash: { prefix: "onioh_fireslash", frameCount: 25, frameMs: 80, durationMs: 2500,   loop: true },
+  spirits:   { prefix: "onioh_spirits",   frameCount: 79, frameMs: 80, durationMs: 79*80,  loop: false },
+  beam:      { prefix: "onioh_beam",      frameCount: 62, frameMs: 80, durationMs: 62*80,  loop: false },
+};
+
+const LEVEL2_BASE_PATTERN = ["idle", "fireslash", "fireslash", "spirits", "beam"];
+const LEVEL2_PATTERN = [].concat(LEVEL2_BASE_PATTERN, LEVEL2_BASE_PATTERN, LEVEL2_BASE_PATTERN, LEVEL2_BASE_PATTERN);
+
+let level2 = null;
+let level2Timer = 0;
+let maskonFrameIdx = 0;
+
+function startLevel2Intro() {
+  currentLevel = "level2";
+  player = newPlayer();
+  level2 = { round: 0, roundTimer: 0, animFrameIdx: 0, animFrameTimer: 0, fireball: null };
+  mode = "level2_dark";
+  level2Timer = 0;
+}
+
+function updateLevel2Intro(dtMs) {
+  level2Timer += dtMs;
+  if (mode === "level2_dark" && level2Timer >= DARK_LEAD_MS) {
+    mode = "level2_maskon"; level2Timer = 0; maskonFrameIdx = 0;
+  } else if (mode === "level2_maskon") {
+    const perFrame = MASKON_TOTAL_MS / ASSET_MANIFEST.maskon;
+    maskonFrameIdx = Math.min(ASSET_MANIFEST.maskon - 1, Math.floor(level2Timer / perFrame));
+    if (level2Timer >= MASKON_TOTAL_MS) { mode = "level2_reveal"; level2Timer = 0; }
+  } else if (mode === "level2_reveal") {
+    updateOniOhAnim(dtMs);
+    if (level2Timer >= REVEAL_MS) { mode = "level2_playing"; level2.round = 0; level2.roundTimer = 0; }
+  }
+}
+
+function updateOniOhAnim(dtMs) {
+  const type = LEVEL2_PATTERN[Math.min(level2.round, LEVEL2_PATTERN.length - 1)];
+  const info = ANIM_INFO[type];
+  level2.animFrameTimer += dtMs;
+  if (level2.animFrameTimer >= info.frameMs) {
+    level2.animFrameTimer -= info.frameMs;
+    level2.animFrameIdx++;
+    if (level2.animFrameIdx >= info.frameCount) level2.animFrameIdx = info.loop ? 0 : info.frameCount - 1;
+  }
+}
+
+function spawnFireball(type) {
+  level2.fireball = { question: generateQuestion(), elapsed: 0, travelMs: ANIM_INFO[type].durationMs };
+  refreshPlaquesFromAnswers([level2.fireball.question.answer]);
+}
+
+function onBossPlaqueSelected(value) {
+  if (!level2.fireball) return;
+  if (value === level2.fireball.question.answer) {
+    level2.fireball = null;
+    triggerPlayerAttack();
+    credits += CREDIT_BY_TYPE.onioh_round; saveCredits();
+  } else {
+    wrongFlashTimer = 250;
+  }
+}
+
+function advanceLevel2Round() {
+  level2.fireball = null;
+  level2.round++;
+  level2.roundTimer = 0;
+  level2.animFrameIdx = 0; level2.animFrameTimer = 0;
+  plaques = [];
+  if (level2.round >= LEVEL2_PATTERN.length) enterLevel2Win();
+}
+
+function enterLevel2Win() {
+  mode = "level2_win";
+  credits += LEVEL2_CLEAR_BONUS; saveCredits();
+  actionButtons = makeActionButtons([
+    { label: "Play Again", onSelect: () => startLevel2Intro() },
+    { label: "Menu", onSelect: () => { mode = "hub"; initHub(); } },
+  ]);
+}
+
+function updateLevel2Playing(dtMs, cursors) {
+  const type = LEVEL2_PATTERN[level2.round];
+  const info = ANIM_INFO[type];
+  updateOniOhAnim(dtMs);
+  level2.roundTimer += dtMs;
+
+  if (type !== "idle") {
+    if (!level2.fireball && level2.roundTimer < 60) spawnFireball(type);
+    if (level2.fireball) {
+      level2.fireball.elapsed += dtMs;
+      updatePlaquesGeneric(dtMs, cursors, onBossPlaqueSelected);
+      if (level2.fireball.elapsed >= level2.fireball.travelMs) {
+        level2.fireball = null;
+        player.hp = Math.max(0, player.hp - LEVEL2_HIT_DAMAGE);
+        player.hitFlash = 250;
+        if (player.hp <= 0) { enterDying(); return; }
+      }
+    }
+  }
+
+  if (level2.roundTimer >= info.durationMs) advanceLevel2Round();
+}
+
+function drawOniOh() {
+  if (!level2) return;
+  const type = LEVEL2_PATTERN[Math.min(level2.round, LEVEL2_PATTERN.length - 1)];
+  const info = ANIM_INFO[type];
+  const frames = ASSET_FRAMES[info.prefix];
+  const img = frames && frames[level2.animFrameIdx];
+  if (!img || !img.naturalWidth) return;
+  const h = canvas.height * ONIOH_HEIGHT_FRAC;
+  const w = h * (img.naturalWidth / img.naturalHeight);
+  const bob = Math.sin(performance.now() / 500) * canvas.height * 0.015;
+  const x = canvas.width * ONIOH_X_FRAC - w / 2;
+  const y = canvas.height * ONIOH_Y_FRAC - h / 2 + bob;
+  ctx.drawImage(img, x, y, w, h);
+}
+
+function drawFireball() {
+  if (!level2 || !level2.fireball) return;
+  const fb = level2.fireball;
+  const t = clamp01(fb.elapsed / fb.travelMs);
+  const oniX = canvas.width * ONIOH_X_FRAC, oniY = canvas.height * ONIOH_Y_FRAC;
+  const targetX = canvas.width * PLAYER_X_FRAC;
+  const targetY = canvas.height * GROUND_Y_FRAC - canvas.height * PLAYER_HEIGHT_FRAC * 0.5;
+  const x = oniX + (targetX - oniX) * t;
+  const y = oniY + (targetY - oniY) * t;
+
+  const img = SINGLE_ASSETS.fireball;
+  const size = canvas.height * 0.09;
+  if (img && img.naturalWidth) {
+    const fh = size, fw = size * (img.naturalWidth / img.naturalHeight);
+    ctx.drawImage(img, x - fw/2, y - fh*0.45, fw, fh);
+  }
+  ctx.font = `bold ${Math.max(16, Math.round(canvas.height * 0.024))}px sans-serif`;
+  ctx.fillStyle = "#ffe066";
+  ctx.textAlign = "center";
+  ctx.fillText(fb.question.text, x, y - size*0.55);
+}
+
+function drawLevel2Intro() {
+  ctx.fillStyle = "#000";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  if (mode === "level2_dark") {
+    drawPlayer({ dim: true });
+  } else if (mode === "level2_maskon") {
+    const img = ASSET_FRAMES.maskon[maskonFrameIdx];
+    if (img && img.naturalWidth) {
+      const h = canvas.height * 0.55;
+      const w = h * (img.naturalWidth / img.naturalHeight);
+      ctx.drawImage(img, canvas.width/2 - w/2, canvas.height/2 - h/2, w, h);
+    }
+  } else if (mode === "level2_reveal") {
+    drawBackground();
+    drawPlayer({});
+    drawOniOh();
+    const pct = clamp01(1 - level2Timer / REVEAL_MS);
+    ctx.fillStyle = `rgba(0,0,0,${pct})`;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  }
+  drawPlayerHud();
+}
+
+// =====================================================================
+// Manual mouse-click fallback (for testing without a phone)
+// =====================================================================
+canvas.addEventListener("click", (e) => {
+  const rect = canvas.getBoundingClientRect();
+  const px = e.clientX - rect.left;
+  const py = e.clientY - rect.top;
+
+  if (mode === "playing" && monsters.length > 0) {
+    const layout = plaqueLayout();
+    for (let i = 0; i < plaques.length; i++) if (pointInRect(px, py, layout[i])) { onPlaqueSelectedLevel1(plaques[i].value); return; }
+    if (pointInRect(px, py, recalibrateBox())) { resetCalibration(); mode = "calibrating"; return; }
+  }
+  if (mode === "level2_playing" && level2 && level2.fireball) {
+    const layout = plaqueLayout();
+    for (let i = 0; i < plaques.length; i++) if (pointInRect(px, py, layout[i])) { onBossPlaqueSelected(plaques[i].value); return; }
+    if (pointInRect(px, py, recalibrateBox())) { resetCalibration(); mode = "calibrating"; return; }
+  }
+  if (mode === "hub" && pointInRect(px, py, recalibrateBox())) { resetCalibration(); mode = "calibrating"; return; }
+  if (mode === "shop") {
+    const layout = shopLayout();
+    for (let i = 0; i < SWORDS.length; i++) if (pointInRect(px, py, layout[i])) { buySwordAt(i); return; }
+  }
+  for (const b of actionButtons) {
+    if (pointInRect(px, py, b)) { const cb = b.onSelect; actionButtons = []; cb(); return; }
+  }
+});
 
 // =====================================================================
 // Main loop
@@ -963,37 +1282,45 @@ let lastFrameTime = performance.now();
 
 function loop() {
   const now = performance.now();
-  const dtMs = Math.min(100, now - lastFrameTime); // clamp huge gaps (tab backgrounded, etc.)
+  const dtMs = Math.min(100, now - lastFrameTime);
   lastFrameTime = now;
 
   ctx.clearRect(0, 0, canvas.width, canvas.height);
-  drawBackground();
 
   if (mode === "calibrating") {
+    drawBackground();
+    ctx.fillStyle = "rgba(0,0,0,0.4)";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
     updateCalibration(dtMs);
-    const boxes = CALIB_BOXES[calib.stage];
-    ctx.fillStyle = "rgba(0,0,0,0.35)";
-    ctx.fillRect(0, 0, canvas.width, canvas.height * 0.16);
-    ctx.fillStyle = "#fff"; ctx.font = "24px sans-serif"; ctx.textAlign = "center";
-    ctx.fillText(
-      calib.stage === 0
-        ? "Stretch your LEFT hand to the left box and RIGHT hand to the right box. Hold 5 seconds."
-        : "Now lower both hands to the boxes below. Hold 5 seconds.",
-      canvas.width / 2, canvas.height * 0.08
-    );
-    drawCalibBox(boxes.left, "Left hand", calib.leftMs, !!calib.leftOccupant);
-    drawCalibBox(boxes.right, "Right hand", calib.rightMs, !!calib.rightOccupant);
+
+    ctx.fillStyle = "#fff";
+    ctx.textAlign = "center";
+    if (calib.phase === "ready") {
+      ctx.font = "bold 30px sans-serif";
+      ctx.fillText("Get ready! Make sure both hands are visible...", canvas.width/2, canvas.height*0.42);
+      ctx.font = "48px sans-serif";
+      ctx.fillText(Math.ceil((CALIB_READY_MS - calib.readyTimer)/1000), canvas.width/2, canvas.height*0.55);
+    } else if (calib.phase === "tracking") {
+      const phaseIdx = Math.min(CALIB_PHASES.length - 1, Math.floor(calib.trackTimer / CALIB_PHASE_MS));
+      ctx.font = "bold 28px sans-serif";
+      ctx.fillText("Move both hands freely - reach as far as comfortable", canvas.width/2, canvas.height*0.30);
+      ctx.font = "bold 64px sans-serif";
+      ctx.fillStyle = "#ffe066";
+      ctx.fillText("REACH " + CALIB_PHASES[phaseIdx], canvas.width/2, canvas.height*0.45);
+
+      const pct = clamp01(calib.trackTimer / CALIB_FREE_MS);
+      const barW = canvas.width*0.5, barH = 18;
+      const bx = canvas.width/2 - barW/2, by = canvas.height*0.55;
+      ctx.fillStyle = "rgba(255,255,255,0.25)"; ctx.fillRect(bx,by,barW,barH);
+      ctx.fillStyle = "#58a6ff"; ctx.fillRect(bx,by,barW*pct,barH);
+      ctx.strokeStyle="#fff"; ctx.lineWidth=2; ctx.strokeRect(bx,by,barW,barH);
+    }
+
     for (const key of RAW_KEYS) {
       const p = rawTracked[key];
       if (!p) continue;
-      let label = "", color = "#8b949e";
-      if (calib.identity) {
-        if (key === calib.identity.left) { label = "L"; color = "#2ecc71"; }
-        else if (key === calib.identity.right) { label = "R"; color = "#e67e22"; }
-      }
       const x = p.x * canvas.width, y = p.y * canvas.height;
-      ctx.beginPath(); ctx.arc(x, y, 26, 0, Math.PI*2); ctx.fillStyle = color; ctx.fill();
-      if (label) { ctx.fillStyle = "#fff"; ctx.font = "16px sans-serif"; ctx.fillText(label, x, y - 34); }
+      ctx.beginPath(); ctx.arc(x, y, 26, 0, Math.PI*2); ctx.fillStyle = "#8b949e"; ctx.fill();
     }
     requestAnimationFrame(loop);
     return;
@@ -1001,29 +1328,28 @@ function loop() {
 
   const cursors = getCursorsPixels();
 
-  if (mode === "start_prompt" || mode === "retry_prompt" || mode === "level_clear") {
-    if (mode === "level_clear") {
-      ctx.fillStyle = "#ffe066";
-      ctx.font = "bold 48px sans-serif";
-      ctx.textAlign = "center";
-      ctx.fillText("LEVEL CLEAR!", canvas.width/2, canvas.height*0.4);
-    } else if (mode === "start_prompt") {
-      ctx.fillStyle = "#fff";
-      ctx.font = "bold 36px sans-serif";
-      ctx.textAlign = "center";
-      ctx.fillText("Calibrated! Hover Start to begin.", canvas.width/2, canvas.height*0.4);
-    } else {
-      ctx.fillStyle = "#fff";
-      ctx.font = "bold 36px sans-serif";
-      ctx.textAlign = "center";
-      ctx.fillText("You were defeated...", canvas.width/2, canvas.height*0.4);
-    }
-    updateActionButton(dtMs, cursors);
-    drawActionButton();
-    if (calib.identity) {
-      drawHandCursor(rawTracked[calib.identity.left], "#2ecc71");
-      drawHandCursor(rawTracked[calib.identity.right], "#e67e22");
-    }
+  if (mode === "hub") { drawHub(cursors, dtMs); requestAnimationFrame(loop); return; }
+
+  if (mode === "shop") {
+    updateShop(dtMs, cursors);
+    drawShop(cursors, dtMs);
+    requestAnimationFrame(loop);
+    return;
+  }
+
+  if (mode === "retry_prompt" || mode === "level_clear" || mode === "level2_win") {
+    drawBackground();
+    ctx.fillStyle = "rgba(0,0,0,0.45)";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = mode === "retry_prompt" ? "#fff" : "#ffe066";
+    ctx.font = "bold 40px sans-serif";
+    ctx.textAlign = "center";
+    const title = mode === "retry_prompt" ? "You were defeated..." : (mode === "level_clear" ? "LEVEL 1 CLEAR!" : "LEVEL 2 CLEAR!");
+    ctx.fillText(title, canvas.width/2, canvas.height*0.35);
+    drawCreditsHud();
+    updateActionButtons(dtMs, cursors);
+    drawActionButtons();
+    drawHandCursors();
     requestAnimationFrame(loop);
     return;
   }
@@ -1032,34 +1358,61 @@ function loop() {
     updateSpawning(dtMs);
     updateMonsters(dtMs);
     updatePlayerAnim(dtMs);
-    updatePlaques(dtMs, cursors);
+    updatePlaquesLevel1(dtMs, cursors);
     updateRecalibrateButton(dtMs, cursors);
     if (wrongFlashTimer > 0) wrongFlashTimer -= dtMs;
 
-    drawPlayer();
+    drawBackground();
+    drawPlayer({});
     for (let i = monsters.length - 1; i >= 0; i--) drawMonster(monsters[i], i === 0);
     drawPlaques();
     drawRecalibrateButton();
-    drawPlayerHud();
-
-    if (calib.identity) {
-      drawHandCursor(rawTracked[calib.identity.left], "#2ecc71");
-      drawHandCursor(rawTracked[calib.identity.right], "#e67e22");
-    }
+    drawPlayerHud(`${currentStage() ? currentStage().type.toUpperCase() : ""}  ${spawnedInStage}/${currentStage() ? currentStage().count : 0}`);
+    drawHandCursors();
 
     if (wrongFlashTimer > 0) {
       ctx.fillStyle = `rgba(255,0,0,${0.15 * (wrongFlashTimer/250)})`;
       ctx.fillRect(0,0,canvas.width,canvas.height);
     }
+    requestAnimationFrame(loop);
+    return;
+  }
 
+  if (mode === "level2_dark" || mode === "level2_maskon" || mode === "level2_reveal") {
+    updateLevel2Intro(dtMs);
+    drawLevel2Intro();
+    requestAnimationFrame(loop);
+    return;
+  }
+
+  if (mode === "level2_playing") {
+    updateLevel2Playing(dtMs, cursors);
+    updatePlayerAnim(dtMs);
+    updateRecalibrateButton(dtMs, cursors);
+    if (wrongFlashTimer > 0) wrongFlashTimer -= dtMs;
+
+    drawBackground();
+    drawPlayer({});
+    drawOniOh();
+    drawFireball();
+    if (level2.fireball) drawPlaques();
+    drawRecalibrateButton();
+    drawPlayerHud(`Round ${level2.round + 1}/${LEVEL2_PATTERN.length}`);
+    drawHandCursors();
+
+    if (wrongFlashTimer > 0) {
+      ctx.fillStyle = `rgba(255,0,0,${0.15 * (wrongFlashTimer/250)})`;
+      ctx.fillRect(0,0,canvas.width,canvas.height);
+    }
     requestAnimationFrame(loop);
     return;
   }
 
   if (mode === "dying") {
-    updateMonsters(0); // freeze positions, just keep drawing last frame
-    drawPlayer();
-    for (let i = monsters.length - 1; i >= 0; i--) drawMonster(monsters[i], i === 0);
+    drawBackground();
+    drawPlayer({});
+    if (currentLevel === "level1") { for (let i = monsters.length - 1; i >= 0; i--) drawMonster(monsters[i], i === 0); }
+    else if (currentLevel === "level2") { drawOniOh(); drawFireball(); }
     fadeTimer += dtMs;
     const pct = Math.min(1, fadeTimer / FADE_MS);
     ctx.fillStyle = `rgba(0,0,0,${pct})`;
