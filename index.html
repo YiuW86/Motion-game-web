@@ -129,8 +129,40 @@ const LEVEL2_CLEAR_BONUS = 300;
 
 const ASSET_MANIFEST = {
   zombie: 25, oni: 25, fenrir: 25, transform: 48, samurai: 20,
-  onioh_idle: 25, onioh_fireslash: 25, onioh_spirits: 79, onioh_beam: 62, maskon: 16,
+  onioh_idle: 25, onioh_fireslash: 25, maskon: 16,
 };
+
+// These two are the video-derived Level 2 boss attacks - by far the heaviest
+// assets (36MB of the ~46MB total). Loading everything up front, on every
+// device, just to reach the level selector risks running out of memory on
+// weaker hardware (smart TV browsers, streaming sticks). Instead these load
+// only when the player actually chooses Level 2, the first time.
+const LEVEL2_HEAVY_MANIFEST = { onioh_spirits: 79, onioh_beam: 62 };
+let level2AssetsReady = false;
+let level2LoadProgress = { loaded: 0, total: 0 };
+
+function loadLevel2HeavyAssets(onDone) {
+  if (level2AssetsReady) { onDone(); return; }
+  const toLoad = [];
+  for (const [prefix, count] of Object.entries(LEVEL2_HEAVY_MANIFEST)) {
+    ASSET_FRAMES[prefix] = new Array(count);
+    for (let i = 0; i < count; i++) {
+      toLoad.push({ prefix, i, src: `assets/${prefix}_${String(i).padStart(2, "0")}.png` });
+    }
+  }
+  let loaded = 0;
+  level2LoadProgress = { loaded: 0, total: toLoad.length };
+  for (const item of toLoad) {
+    const img = new Image();
+    img.onload = img.onerror = () => {
+      loaded++;
+      level2LoadProgress.loaded = loaded;
+      if (loaded >= toLoad.length) { level2AssetsReady = true; onDone(); }
+    };
+    img.src = item.src;
+    ASSET_FRAMES[item.prefix][item.i] = img;
+  }
+}
 
 const SINGLE_ASSETS_MANIFEST = [
   "fireball",
@@ -1096,6 +1128,15 @@ let level2Timer = 0;
 let maskonFrameIdx = 0;
 
 function startLevel2Intro() {
+  if (!level2AssetsReady) {
+    mode = "level2_loading";
+    loadLevel2HeavyAssets(() => { beginLevel2AfterLoad(); });
+    return;
+  }
+  beginLevel2AfterLoad();
+}
+
+function beginLevel2AfterLoad() {
   currentLevel = "level2";
   player = newPlayer();
   level2 = { round: 0, roundTimer: 0, animFrameIdx: 0, animFrameTimer: 0, fireball: null };
@@ -1374,6 +1415,20 @@ function loop() {
       ctx.fillStyle = `rgba(255,0,0,${0.15 * (wrongFlashTimer/250)})`;
       ctx.fillRect(0,0,canvas.width,canvas.height);
     }
+    requestAnimationFrame(loop);
+    return;
+  }
+
+  if (mode === "level2_loading") {
+    drawBackground();
+    ctx.fillStyle = "rgba(0,0,0,0.55)";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = "#fff";
+    ctx.font = "bold 30px sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("Loading Level 2...", canvas.width/2, canvas.height*0.46);
+    ctx.font = "20px sans-serif";
+    ctx.fillText(`${level2LoadProgress.loaded}/${level2LoadProgress.total}`, canvas.width/2, canvas.height*0.53);
     requestAnimationFrame(loop);
     return;
   }
