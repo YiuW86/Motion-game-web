@@ -1432,11 +1432,30 @@ function beginLevel3Intro() {
   currentLevel = "level3";
   player = newPlayer();
   mode = "level3_intro_video";
+  playIntroVideoWithFallback();
+}
+
+function playIntroVideoWithFallback() {
+  const v = level3IntroVideo;
+  let advanced = false;
+  const advance = () => { if (advanced) return; advanced = true; enterLevel3Briefing(); };
+
+  v.onended = advance;
+  // Hard safety net: some browsers/TV WebViews silently refuse to start
+  // video playback when play() wasn't called from a direct click/tap (e.g.
+  // triggered by a hover-dwell selection instead) - even when muted. If
+  // that happens 'ended' never fires and the screen would otherwise be
+  // stuck forever on a frozen frame. This guarantees we always move on.
+  const expectedMs = (Number.isFinite(v.duration) && v.duration > 0 ? v.duration * 1000 : 10000) + 1500;
+  setTimeout(advance, expectedMs);
+
   try {
-    level3IntroVideo.currentTime = 0;
-    level3IntroVideo.play().catch(() => {});
-  } catch (e) {}
-  level3IntroVideo.onended = () => { enterLevel3Briefing(); };
+    v.currentTime = 0;
+    const p = v.play();
+    if (p && typeof p.catch === "function") {
+      p.catch(() => { advance(); }); // autoplay was refused - don't wait on a frozen frame
+    }
+  } catch (e) { advance(); }
 }
 
 function enterLevel3Briefing() {
@@ -1517,17 +1536,27 @@ function updateLevel3Playing(dtMs) {
 
 function enterLevel3Outro() {
   mode = "level3_outro_video";
-  try {
-    level3OutroVideo.currentTime = 0;
-    level3OutroVideo.play().catch(() => {});
-  } catch (e) {}
-  level3OutroVideo.onended = () => {
+  const v = level3OutroVideo;
+  let advanced = false;
+  const advance = () => {
+    if (advanced) return;
+    advanced = true;
     const netGain = Math.max(0, level3.score - LEVEL3_BASE_SCORE);
     credits += netGain;
     if (level3.passed) credits += LEVEL3_CLEAR_BONUS;
     saveCredits();
     if (level3.passed) enterLevel3Clear(); else enterRetryPrompt();
   };
+
+  v.onended = advance;
+  const expectedMs = (Number.isFinite(v.duration) && v.duration > 0 ? v.duration * 1000 : 10000) + 1500;
+  setTimeout(advance, expectedMs);
+
+  try {
+    v.currentTime = 0;
+    const p = v.play();
+    if (p && typeof p.catch === "function") p.catch(() => { advance(); });
+  } catch (e) { advance(); }
 }
 
 function enterLevel3Clear() {
@@ -1542,10 +1571,17 @@ function drawLetterboxedVideo(video) {
   ctx.fillStyle = "#000";
   ctx.fillRect(0, 0, canvas.width, canvas.height);
   if (!video || !video.videoWidth) return;
-  const vw = video.videoWidth, vh = video.videoHeight;
-  const scale = Math.min(canvas.width / vw, canvas.height / vh);
-  const dw = vw * scale, dh = vh * scale;
-  ctx.drawImage(video, (canvas.width - dw) / 2, (canvas.height - dh) / 2, dw, dh);
+  try {
+    const vw = video.videoWidth, vh = video.videoHeight;
+    const scale = Math.min(canvas.width / vw, canvas.height / vh);
+    const dw = vw * scale, dh = vh * scale;
+    ctx.drawImage(video, (canvas.width - dw) / 2, (canvas.height - dh) / 2, dw, dh);
+  } catch (e) {
+    ctx.fillStyle = "#fff";
+    ctx.font = "20px sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("Video couldn't play - hover/click Skip to continue", canvas.width/2, canvas.height/2);
+  }
 }
 
 function drawLevel3Lane(x, yFrac, progress, content) {
