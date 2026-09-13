@@ -228,11 +228,12 @@ let level3OutroVideo = null;
 function loadLevel3Assets(onDone) {
   if (level3AssetsReady) { onDone(); return; }
   let loaded = 0;
+  let settled = false;
   level3LoadProgress = { loaded: 0, total: 4 };
   function mark() {
     loaded++;
     level3LoadProgress.loaded = loaded;
-    if (loaded >= 4) { level3AssetsReady = true; onDone(); }
+    if (loaded >= 4 && !settled) { settled = true; level3AssetsReady = true; onDone(); }
   }
 
   const gateImg = new Image();
@@ -247,15 +248,15 @@ function loadLevel3Assets(onDone) {
 
   const introVid = document.createElement("video");
   introVid.muted = true; introVid.playsInline = true; introVid.preload = "auto";
-  introVid.oncanplaythrough = mark;
-  introVid.onerror = mark;
+  introVid.oncanplaythrough = () => { introVid.oncanplaythrough = null; mark(); };
+  introVid.onerror = () => { introVid.onerror = null; mark(); };
   introVid.src = "assets/level3_intro.mp4";
   level3IntroVideo = introVid;
 
   const outroVid = document.createElement("video");
   outroVid.muted = true; outroVid.playsInline = true; outroVid.preload = "auto";
-  outroVid.oncanplaythrough = mark;
-  outroVid.onerror = mark;
+  outroVid.oncanplaythrough = () => { outroVid.oncanplaythrough = null; mark(); };
+  outroVid.onerror = () => { outroVid.onerror = null; mark(); };
   outroVid.src = "assets/level3_outro.mp4";
   level3OutroVideo = outroVid;
 }
