@@ -216,6 +216,50 @@ loadAllAssets(() => {
   statusEl.textContent = "Assets ready. Enter a room code to begin.";
 });
 
+// --- Level 3 assets (gate sprite, its own background, intro/outro videos) ---
+// Loaded on demand the first time Level 3 is selected, same reasoning as
+// Level 2's heavy assets: keep the initial page load light.
+let level3AssetsReady = false;
+let level3LoadProgress = { loaded: 0, total: 4 };
+let level3BackgroundImg = null;
+let level3IntroVideo = null;
+let level3OutroVideo = null;
+
+function loadLevel3Assets(onDone) {
+  if (level3AssetsReady) { onDone(); return; }
+  let loaded = 0;
+  level3LoadProgress = { loaded: 0, total: 4 };
+  function mark() {
+    loaded++;
+    level3LoadProgress.loaded = loaded;
+    if (loaded >= 4) { level3AssetsReady = true; onDone(); }
+  }
+
+  const gateImg = new Image();
+  gateImg.onload = gateImg.onerror = mark;
+  gateImg.src = "assets/torii_gate.png";
+  SINGLE_ASSETS.torii_gate = gateImg;
+
+  const bg = new Image();
+  bg.onload = () => { level3BackgroundImg = bg; mark(); };
+  bg.onerror = mark;
+  bg.src = "assets/level3_background.jpg";
+
+  const introVid = document.createElement("video");
+  introVid.muted = true; introVid.playsInline = true; introVid.preload = "auto";
+  introVid.oncanplaythrough = mark;
+  introVid.onerror = mark;
+  introVid.src = "assets/level3_intro.mp4";
+  level3IntroVideo = introVid;
+
+  const outroVid = document.createElement("video");
+  outroVid.muted = true; outroVid.playsInline = true; outroVid.preload = "auto";
+  outroVid.oncanplaythrough = mark;
+  outroVid.onerror = mark;
+  outroVid.src = "assets/level3_outro.mp4";
+  level3OutroVideo = outroVid;
+}
+
 // =====================================================================
 // Hand tracking: networking + filtering handoff
 // =====================================================================
@@ -735,6 +779,7 @@ function initHub() {
   actionButtons = makeActionButtons([
     { label: "Level 1", onSelect: () => startLevel1() },
     { label: "Level 2", onSelect: () => startLevel2Intro() },
+    { label: "Level 3", onSelect: () => startLevel3() },
     { label: "Shop", onSelect: () => enterShop() },
   ]);
 }
@@ -1096,7 +1141,11 @@ function enterTransformAnim() { mode = "transform_anim"; transformTimer = 0; tra
 function enterRetryPrompt() {
   mode = "retry_prompt";
   actionButtons = makeActionButtons([
-    { label: "Retry", onSelect: () => { if (currentLevel === "level2") startLevel2Intro(); else startLevel1(); } },
+    { label: "Retry", onSelect: () => {
+        if (currentLevel === "level2") startLevel2Intro();
+        else if (currentLevel === "level3") startLevel3();
+        else startLevel1();
+      } },
     { label: "Menu", onSelect: () => { mode = "hub"; initHub(); } },
   ]);
 }
@@ -1288,6 +1337,338 @@ function drawLevel2Intro() {
 }
 
 // =====================================================================
+// LEVEL 3 - Torii gate runner
+// =====================================================================
+// A rapid-fire "pick your operation" runner: 20 gate-rounds (two of the
+// three lanes show a math operation, the third is a deliberate "skip both"
+// gap) shuffled together with 10 zombie and 10 oni obstacles (each blocking
+// exactly one lane - be elsewhere). Lane choice comes from the midpoint
+// between your two tracked hands, mapped through the same calibration as
+// everywhere else - lean/shift your whole upper body left/center/right.
+
+const LEVEL3_LANE_X = [0.28, 0.50, 0.72];
+const LEVEL3_PLAYER_Y_FRAC = 0.80;
+const LEVEL3_VANISH_X_FRAC = 0.50;
+const LEVEL3_VANISH_Y_FRAC = 0.34;
+const LEVEL3_APPROACH_MS = 2200;
+const LEVEL3_RESOLVE_MS = 400; // gate spin/fade-out duration, per spec (4/10ths of a second)
+const LEVEL3_BASE_SCORE = 100;
+const LEVEL3_GATE_COUNT = 20;
+const LEVEL3_ZOMBIE_COUNT = 10;
+const LEVEL3_ONI_COUNT = 10;
+const LEVEL3_ZOMBIE_PENALTY = 8;
+const LEVEL3_ONI_PENALTY = 15;
+const LEVEL3_PASS_FRACTION = 0.40; // must end with at least start + 40% of the max possible gate-only gain
+const LEVEL3_CLEAR_BONUS = 100;
+
+const LEVEL3_GATE_OPS = [
+  { label: "+3",  fn: s => s + 3 },
+  { label: "+5",  fn: s => s + 5 },
+  { label: "+8",  fn: s => s + 8 },
+  { label: "+12", fn: s => s + 12 },
+  { label: "\u00D72",   fn: s => Math.round(s * 2) },
+  { label: "\u00D71.5", fn: s => Math.round(s * 1.5) },
+  { label: "-5",  fn: s => s - 5 },
+  { label: "-8",  fn: s => s - 8 },
+  { label: "-10", fn: s => s - 10 },
+  { label: "\u00F72",   fn: s => Math.round(s / 2) },
+];
+
+let level3 = null; // { sequence, idx, score, threshold, passed, ... }
+let level3Timer = 0;
+let level3ClickOverrideLane = null; // set briefly by the mouse-click fallback
+
+function buildLevel3Sequence() {
+  const encounters = [];
+  for (let i = 0; i < LEVEL3_GATE_COUNT; i++) {
+    const lanes = [0, 1, 2];
+    shuffle(lanes);
+    const [laneA, laneB] = lanes; // third stays empty
+    const opA = LEVEL3_GATE_OPS[Math.floor(Math.random() * LEVEL3_GATE_OPS.length)];
+    let opB = LEVEL3_GATE_OPS[Math.floor(Math.random() * LEVEL3_GATE_OPS.length)];
+    let guard = 0;
+    while (opB === opA && guard < 20) { opB = LEVEL3_GATE_OPS[Math.floor(Math.random() * LEVEL3_GATE_OPS.length)]; guard++; }
+    const laneContent = [null, null, null];
+    laneContent[laneA] = opA; laneContent[laneB] = opB;
+    encounters.push({ type: "gate", laneContent });
+  }
+  for (let i = 0; i < LEVEL3_ZOMBIE_COUNT; i++) {
+    const laneContent = [null, null, null];
+    laneContent[Math.floor(Math.random() * 3)] = { hazard: true, kind: "zombie" };
+    encounters.push({ type: "zombie", laneContent });
+  }
+  for (let i = 0; i < LEVEL3_ONI_COUNT; i++) {
+    const laneContent = [null, null, null];
+    laneContent[Math.floor(Math.random() * 3)] = { hazard: true, kind: "oni" };
+    encounters.push({ type: "oni", laneContent });
+  }
+  shuffle(encounters);
+  return encounters;
+}
+
+function computeLevel3Threshold(sequence) {
+  let score = LEVEL3_BASE_SCORE;
+  for (const enc of sequence) {
+    if (enc.type !== "gate") continue;
+    const options = enc.laneContent.filter(c => c && !c.hazard);
+    let best = score;
+    for (const op of options) best = Math.max(best, op.fn(score));
+    score = best;
+  }
+  const gain = score - LEVEL3_BASE_SCORE;
+  return Math.round(LEVEL3_BASE_SCORE + LEVEL3_PASS_FRACTION * gain);
+}
+
+function startLevel3() {
+  if (!level3AssetsReady) {
+    mode = "level3_loading";
+    loadLevel3Assets(() => { beginLevel3Intro(); });
+    return;
+  }
+  beginLevel3Intro();
+}
+
+function beginLevel3Intro() {
+  currentLevel = "level3";
+  player = newPlayer();
+  mode = "level3_intro_video";
+  try {
+    level3IntroVideo.currentTime = 0;
+    level3IntroVideo.play().catch(() => {});
+  } catch (e) {}
+  level3IntroVideo.onended = () => { enterLevel3Briefing(); };
+}
+
+function enterLevel3Briefing() {
+  const sequence = buildLevel3Sequence();
+  const threshold = computeLevel3Threshold(sequence);
+  level3 = {
+    sequence, idx: 0, score: LEVEL3_BASE_SCORE, threshold, passed: false,
+    encounterTimer: 0, encounterPhase: "approaching",
+    currentLane: 1, displayLaneX: LEVEL3_LANE_X[1],
+  };
+  mode = "level3_briefing";
+  actionButtons = makeActionButtons([{ label: "Start Run", onSelect: () => { mode = "level3_playing"; } }]);
+}
+
+function laneFromCursor() {
+  if (!calib || !calib.identity || !calib.rect) return 1;
+  const lp = rawTracked[calib.identity.left];
+  const rp = rawTracked[calib.identity.right];
+  if (!lp && !rp) return level3 ? level3.currentLane : 1;
+  let mx;
+  if (lp && rp) mx = (lp.x + rp.x) / 2;
+  else mx = (lp || rp).x;
+  const my = (lp && rp) ? (lp.y + rp.y) / 2 : (lp || rp).y;
+  const screenPos = mapToScreen({ x: mx, y: my });
+  if (level3ClickOverrideLane !== null) return level3ClickOverrideLane;
+  if (screenPos.x < 0.33) return 0;
+  if (screenPos.x > 0.66) return 2;
+  return 1;
+}
+
+function resolveLevel3Encounter() {
+  const enc = level3.sequence[level3.idx];
+  const slot = enc.laneContent[level3.currentLane];
+  if (slot) {
+    if (slot.hazard) {
+      level3.score -= (slot.kind === "zombie" ? LEVEL3_ZOMBIE_PENALTY : LEVEL3_ONI_PENALTY);
+      player.hitFlash = 250;
+    } else {
+      level3.score = slot.fn(level3.score);
+      triggerPlayerAttack();
+    }
+  }
+  if (level3.score <= 0) {
+    level3.score = 0;
+    level3.passed = false;
+    enterLevel3Outro();
+  }
+}
+
+function updateLevel3Playing(dtMs) {
+  level3.currentLane = laneFromCursor();
+  const targetX = LEVEL3_LANE_X[level3.currentLane];
+  const alpha = 1 - Math.exp(-dtMs / 150);
+  level3.displayLaneX += (targetX - level3.displayLaneX) * alpha;
+
+  if (level3.encounterPhase === "approaching") {
+    level3.encounterTimer += dtMs;
+    if (level3.encounterTimer >= LEVEL3_APPROACH_MS) {
+      resolveLevel3Encounter();
+      if (mode !== "level3_playing") return; // may have ended the run (score hit 0)
+      level3.encounterPhase = "resolved";
+      level3.encounterTimer = 0;
+    }
+  } else {
+    level3.encounterTimer += dtMs;
+    if (level3.encounterTimer >= LEVEL3_RESOLVE_MS) {
+      level3.idx++;
+      if (level3.idx >= level3.sequence.length) {
+        level3.passed = level3.score >= level3.threshold;
+        enterLevel3Outro();
+        return;
+      }
+      level3.encounterPhase = "approaching";
+      level3.encounterTimer = 0;
+    }
+  }
+}
+
+function enterLevel3Outro() {
+  mode = "level3_outro_video";
+  try {
+    level3OutroVideo.currentTime = 0;
+    level3OutroVideo.play().catch(() => {});
+  } catch (e) {}
+  level3OutroVideo.onended = () => {
+    const netGain = Math.max(0, level3.score - LEVEL3_BASE_SCORE);
+    credits += netGain;
+    if (level3.passed) credits += LEVEL3_CLEAR_BONUS;
+    saveCredits();
+    if (level3.passed) enterLevel3Clear(); else enterRetryPrompt();
+  };
+}
+
+function enterLevel3Clear() {
+  mode = "level3_win";
+  actionButtons = makeActionButtons([
+    { label: "Play Again", onSelect: () => startLevel3() },
+    { label: "Menu", onSelect: () => { mode = "hub"; initHub(); } },
+  ]);
+}
+
+function drawLetterboxedVideo(video) {
+  ctx.fillStyle = "#000";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  if (!video || !video.videoWidth) return;
+  const vw = video.videoWidth, vh = video.videoHeight;
+  const scale = Math.min(canvas.width / vw, canvas.height / vh);
+  const dw = vw * scale, dh = vh * scale;
+  ctx.drawImage(video, (canvas.width - dw) / 2, (canvas.height - dh) / 2, dw, dh);
+}
+
+function drawLevel3Lane(x, yFrac, progress, content) {
+  const y = canvas.height * yFrac;
+  const scale = 0.18 + 0.82 * progress;
+  if (!content) return;
+  if (content.hazard) {
+    const prefix = content.kind === "zombie" ? "zombie" : "oni";
+    const frames = ASSET_FRAMES[prefix];
+    const frameIdx = Math.floor(performance.now() / 80) % frames.length;
+    const img = frames[frameIdx];
+    if (img && img.naturalWidth) {
+      const h = canvas.height * 0.22 * scale;
+      const w = h * (img.naturalWidth / img.naturalHeight);
+      ctx.drawImage(img, x - w/2, y - h, w, h);
+    }
+  } else {
+    const img = SINGLE_ASSETS.torii_gate;
+    if (img && img.naturalWidth) {
+      const h = canvas.height * 0.32 * scale;
+      const w = h * (img.naturalWidth / img.naturalHeight);
+      ctx.save();
+      ctx.translate(x, y - h/2);
+      ctx.drawImage(img, -w/2, -h/2, w, h);
+      ctx.restore();
+    }
+    ctx.font = `bold ${Math.max(18, Math.round(canvas.height * 0.035 * scale))}px sans-serif`;
+    ctx.fillStyle = "#fff";
+    ctx.textAlign = "center";
+    ctx.strokeStyle = "#000"; ctx.lineWidth = 3;
+    ctx.strokeText(content.label, x, y - h * 0.55);
+    ctx.fillText(content.label, x, y - h * 0.55);
+  }
+}
+
+function drawLevel3Playing(dtMs) {
+  if (!level3BackgroundImg) { ctx.fillStyle = "#0d1117"; ctx.fillRect(0,0,canvas.width,canvas.height); }
+  else {
+    const cw = canvas.width, ch = canvas.height;
+    const iw = level3BackgroundImg.naturalWidth, ih = level3BackgroundImg.naturalHeight;
+    const scale = Math.max(cw / iw, ch / ih);
+    ctx.drawImage(level3BackgroundImg, (cw - iw*scale)/2, (ch - ih*scale)/2, iw*scale, ih*scale);
+  }
+
+  const enc = level3.sequence[level3.idx];
+  const vanishX = canvas.width * LEVEL3_VANISH_X_FRAC;
+  const vanishY = canvas.height * LEVEL3_VANISH_Y_FRAC;
+
+  let progress, fading = false, fadePct = 1;
+  if (level3.encounterPhase === "approaching") {
+    progress = clamp01(level3.encounterTimer / LEVEL3_APPROACH_MS);
+  } else {
+    progress = 1;
+    fading = true;
+    fadePct = clamp01(1 - level3.encounterTimer / LEVEL3_RESOLVE_MS);
+  }
+
+  for (let lane = 0; lane < 3; lane++) {
+    const content = enc.laneContent[lane];
+    if (!content) continue;
+    const targetX = canvas.width * LEVEL3_LANE_X[lane];
+    const targetY = LEVEL3_PLAYER_Y_FRAC;
+    const x = vanishX + (targetX - vanishX) * progress;
+    const yFrac = LEVEL3_VANISH_Y_FRAC + (targetY - LEVEL3_VANISH_Y_FRAC) * progress;
+
+    ctx.save();
+    if (fading) {
+      ctx.globalAlpha = fadePct;
+      const spin = (1 - fadePct) * Math.PI * 2;
+      ctx.translate(x, canvas.height * yFrac);
+      ctx.rotate(spin);
+      ctx.translate(-x, -canvas.height * yFrac);
+    }
+    drawLevel3Lane(x, yFrac, progress, content);
+    ctx.restore();
+  }
+
+  const playerScreenX = canvas.width * level3.displayLaneX;
+  ctx.save();
+  ctx.translate(playerScreenX - canvas.width * PLAYER_X_FRAC, canvas.height * LEVEL3_PLAYER_Y_FRAC - canvas.height * GROUND_Y_FRAC);
+  drawPlayer({});
+  ctx.restore();
+
+  // Score readout at the top-right of the character.
+  const scoreX = playerScreenX + canvas.width * 0.09;
+  const scoreY = canvas.height * LEVEL3_PLAYER_Y_FRAC - canvas.height * PLAYER_HEIGHT_FRAC - 10;
+  ctx.font = `bold ${Math.round(canvas.height*0.04)}px sans-serif`;
+  ctx.textAlign = "center";
+  ctx.strokeStyle = "#000"; ctx.lineWidth = 4;
+  ctx.strokeText(String(level3.score), scoreX, scoreY);
+  ctx.fillStyle = "#ffe066";
+  ctx.fillText(String(level3.score), scoreX, scoreY);
+
+  ctx.font = `${Math.round(canvas.height*0.022)}px sans-serif`;
+  ctx.fillStyle = "#fff";
+  ctx.textAlign = "left";
+  ctx.fillText(`Encounter ${level3.idx+1}/${level3.sequence.length}  |  Need ${level3.threshold} to pass`, 16, canvas.height*0.06);
+}
+
+function drawLevel3Briefing() {
+  if (level3BackgroundImg) {
+    const cw = canvas.width, ch = canvas.height;
+    const iw = level3BackgroundImg.naturalWidth, ih = level3BackgroundImg.naturalHeight;
+    const scale = Math.max(cw / iw, ch / ih);
+    ctx.drawImage(level3BackgroundImg, (cw - iw*scale)/2, (ch - ih*scale)/2, iw*scale, ih*scale);
+  }
+  ctx.fillStyle = "rgba(0,0,0,0.5)";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  ctx.textAlign = "center";
+  ctx.fillStyle = "#fff";
+  ctx.font = "bold 34px sans-serif";
+  ctx.fillText("Torii Gate Run", canvas.width/2, canvas.height*0.28);
+  ctx.font = "24px sans-serif";
+  ctx.fillText(`Starting score: ${LEVEL3_BASE_SCORE}`, canvas.width/2, canvas.height*0.36);
+  ctx.fillStyle = "#ffe066";
+  ctx.fillText(`You must finish with at least ${level3.threshold} points to pass!`, canvas.width/2, canvas.height*0.42);
+  ctx.fillStyle = "#fff";
+  ctx.font = "20px sans-serif";
+  ctx.fillText("Lean left / center / right to change lanes. Pick gates, dodge obstacles.", canvas.width/2, canvas.height*0.48);
+}
+
+// =====================================================================
 // Manual mouse-click fallback (for testing without a phone)
 // =====================================================================
 canvas.addEventListener("click", (e) => {
@@ -1309,6 +1690,18 @@ canvas.addEventListener("click", (e) => {
   if (mode === "shop") {
     const layout = shopLayout();
     for (let i = 0; i < SWORDS.length; i++) if (pointInRect(px, py, layout[i])) { buySwordAt(i); return; }
+  }
+  if (mode === "level3_intro_video") {
+    level3IntroVideo.pause();
+    enterLevel3Briefing();
+    return;
+  }
+  if (mode === "level3_playing") {
+    // Click left third / middle third / right third of the screen to pick a lane.
+    if (px < canvas.width / 3) level3ClickOverrideLane = 0;
+    else if (px > canvas.width * 2 / 3) level3ClickOverrideLane = 2;
+    else level3ClickOverrideLane = 1;
+    setTimeout(() => { level3ClickOverrideLane = null; }, 50);
   }
   for (const b of actionButtons) {
     if (pointInRect(px, py, b)) { const cb = b.onSelect; actionButtons = []; cb(); return; }
@@ -1459,6 +1852,89 @@ function loop() {
       ctx.fillStyle = `rgba(255,0,0,${0.15 * (wrongFlashTimer/250)})`;
       ctx.fillRect(0,0,canvas.width,canvas.height);
     }
+    requestAnimationFrame(loop);
+    return;
+  }
+
+  if (mode === "level3_loading") {
+    ctx.fillStyle = "#0d1117";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = "#fff";
+    ctx.font = "bold 30px sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("Loading Level 3...", canvas.width/2, canvas.height*0.46);
+    ctx.font = "20px sans-serif";
+    ctx.fillText(`${level3LoadProgress.loaded}/${level3LoadProgress.total}`, canvas.width/2, canvas.height*0.53);
+    requestAnimationFrame(loop);
+    return;
+  }
+
+  if (mode === "level3_intro_video") {
+    drawLetterboxedVideo(level3IntroVideo);
+    const skipW = canvas.width*0.12, skipH = canvas.height*0.06;
+    const skipBox = { x: canvas.width - skipW - 16, y: canvas.height - skipH - 16, w: skipW, h: skipH };
+    let occ = null;
+    for (const c of cursors) if (pointInRect(c.px, c.py, skipBox)) { occ = c.id; break; }
+    if (occ && occ === recalibrateBtn.occupant) recalibrateBtn.holdMs += dtMs;
+    else { recalibrateBtn.occupant = occ; recalibrateBtn.holdMs = occ ? dtMs : 0; }
+    ctx.fillStyle = "rgba(0,0,0,0.5)";
+    roundRect(skipBox.x, skipBox.y, skipBox.w, skipBox.h, 8); ctx.fill();
+    ctx.fillStyle = "#fff"; ctx.font = "18px sans-serif"; ctx.textAlign = "center";
+    ctx.fillText("Skip", skipBox.x+skipBox.w/2, skipBox.y+skipBox.h*0.65);
+    if (recalibrateBtn.holdMs >= HOVER_MS) {
+      recalibrateBtn.holdMs = 0; recalibrateBtn.occupant = null;
+      level3IntroVideo.pause();
+      enterLevel3Briefing();
+    }
+    requestAnimationFrame(loop);
+    return;
+  }
+
+  if (mode === "level3_briefing") {
+    drawLevel3Briefing();
+    updateActionButtons(dtMs, cursors);
+    drawActionButtons();
+    drawHandCursors();
+    requestAnimationFrame(loop);
+    return;
+  }
+
+  if (mode === "level3_playing") {
+    updateLevel3Playing(dtMs);
+    if (mode !== "level3_playing") { requestAnimationFrame(loop); return; }
+    updatePlayerAnim(dtMs);
+    drawLevel3Playing(dtMs);
+    drawHandCursors();
+    requestAnimationFrame(loop);
+    return;
+  }
+
+  if (mode === "level3_outro_video") {
+    drawLetterboxedVideo(level3OutroVideo);
+    ctx.font = "bold 46px sans-serif";
+    ctx.textAlign = "center";
+    ctx.strokeStyle = "#000"; ctx.lineWidth = 5;
+    ctx.strokeText(`Final Score: ${level3.score}`, canvas.width/2, canvas.height*0.12);
+    ctx.fillStyle = "#ffe066";
+    ctx.fillText(`Final Score: ${level3.score}`, canvas.width/2, canvas.height*0.12);
+    requestAnimationFrame(loop);
+    return;
+  }
+
+  if (mode === "level3_win") {
+    drawBackground();
+    ctx.fillStyle = "rgba(0,0,0,0.45)";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = "#ffe066";
+    ctx.font = "bold 40px sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("LEVEL 3 CLEAR!", canvas.width/2, canvas.height*0.32);
+    ctx.font = "24px sans-serif";
+    ctx.fillText(`Final score: ${level3.score}`, canvas.width/2, canvas.height*0.40);
+    drawCreditsHud();
+    updateActionButtons(dtMs, cursors);
+    drawActionButtons();
+    drawHandCursors();
     requestAnimationFrame(loop);
     return;
   }
