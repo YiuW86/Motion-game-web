@@ -1617,8 +1617,8 @@ function drawLevel3Lane(x, yFrac, progress, content) {
     }
   } else {
     const img = SINGLE_ASSETS.torii_gate;
+    const h = canvas.height * 0.32 * scale;
     if (img && img.naturalWidth) {
-      const h = canvas.height * 0.32 * scale;
       const w = h * (img.naturalWidth / img.naturalHeight);
       ctx.save();
       ctx.translate(x, y - h/2);
@@ -1779,10 +1779,14 @@ let lastFrameTime = performance.now();
 let lastGoodMode = null;
 function loop() {
   try {
+    ctx.setTransform(1, 0, 0, 1, 0, 0); // guard against a previous frame leaving a transform active
     lastGoodMode = mode;
     loopInner();
   } catch (err) {
     console.error("Render loop error:", err);
+    ctx.setTransform(1, 0, 0, 1, 0, 0); // undo any leftover rotate/translate/scale from the crash point
+    ctx.globalAlpha = 1;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.fillStyle = "rgba(0,0,0,0.85)";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     ctx.fillStyle = "#ff5555";
