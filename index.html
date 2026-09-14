@@ -1420,10 +1420,18 @@ function computeLevel3Threshold(sequence) {
   return Math.round(LEVEL3_BASE_SCORE + LEVEL3_PASS_FRACTION * gain);
 }
 
+let level3IntroToken = 0;
+let level3DebugBriefingCalls = 0;
+let level3SkipBtn = { holdMs: 0, occupant: null };
+
 function startLevel3() {
   if (!level3AssetsReady) {
     mode = "level3_loading";
-    loadLevel3Assets(() => { beginLevel3Intro(); });
+    const myToken = ++level3IntroToken;
+    loadLevel3Assets(() => {
+      if (myToken !== level3IntroToken) return; // a newer request superseded this one
+      beginLevel3Intro();
+    });
     return;
   }
   beginLevel3Intro();
@@ -1433,13 +1441,20 @@ function beginLevel3Intro() {
   currentLevel = "level3";
   player = newPlayer();
   mode = "level3_intro_video";
-  playIntroVideoWithFallback();
+  level3SkipBtn = { holdMs: 0, occupant: null };
+  const myToken = ++level3IntroToken;
+  playIntroVideoWithFallback(myToken);
 }
 
-function playIntroVideoWithFallback() {
+function playIntroVideoWithFallback(myToken) {
   const v = level3IntroVideo;
   let advanced = false;
-  const advance = () => { if (advanced) return; advanced = true; enterLevel3Briefing(); };
+  const advance = () => {
+    if (advanced) return;
+    if (myToken !== level3IntroToken) return; // superseded by a newer intro sequence - ignore
+    advanced = true;
+    enterLevel3Briefing();
+  };
 
   v.onended = advance;
   // Hard safety net: some browsers/TV WebViews silently refuse to start
@@ -1460,6 +1475,7 @@ function playIntroVideoWithFallback() {
 }
 
 function enterLevel3Briefing() {
+  level3DebugBriefingCalls++;
   const sequence = buildLevel3Sequence();
   const threshold = computeLevel3Threshold(sequence);
   level3 = {
@@ -1682,6 +1698,15 @@ function drawLevel3Playing(dtMs) {
   ctx.fillText(`Encounter ${level3.idx+1}/${level3.sequence.length}  |  Need ${level3.threshold} to pass`, 16, canvas.height*0.06);
 }
 
+function drawLevel3DebugReadout() {
+  ctx.fillStyle = "rgba(0,0,0,0.6)";
+  ctx.fillRect(0, canvas.height - 26, 420, 26);
+  ctx.fillStyle = "#0f0";
+  ctx.font = "13px monospace";
+  ctx.textAlign = "left";
+  ctx.fillText(`debug: mode=${mode}  briefingCalls=${level3DebugBriefingCalls}  token=${level3IntroToken}`, 6, canvas.height - 8);
+}
+
 function drawLevel3Briefing() {
   if (level3BackgroundImg) {
     const cw = canvas.width, ch = canvas.height;
@@ -1902,6 +1927,7 @@ function loop() {
     ctx.fillText("Loading Level 3...", canvas.width/2, canvas.height*0.46);
     ctx.font = "20px sans-serif";
     ctx.fillText(`${level3LoadProgress.loaded}/${level3LoadProgress.total}`, canvas.width/2, canvas.height*0.53);
+    drawLevel3DebugReadout();
     requestAnimationFrame(loop);
     return;
   }
@@ -1912,17 +1938,18 @@ function loop() {
     const skipBox = { x: canvas.width - skipW - 16, y: canvas.height - skipH - 16, w: skipW, h: skipH };
     let occ = null;
     for (const c of cursors) if (pointInRect(c.px, c.py, skipBox)) { occ = c.id; break; }
-    if (occ && occ === recalibrateBtn.occupant) recalibrateBtn.holdMs += dtMs;
-    else { recalibrateBtn.occupant = occ; recalibrateBtn.holdMs = occ ? dtMs : 0; }
+    if (occ && occ === level3SkipBtn.occupant) level3SkipBtn.holdMs += dtMs;
+    else { level3SkipBtn.occupant = occ; level3SkipBtn.holdMs = occ ? dtMs : 0; }
     ctx.fillStyle = "rgba(0,0,0,0.5)";
     roundRect(skipBox.x, skipBox.y, skipBox.w, skipBox.h, 8); ctx.fill();
     ctx.fillStyle = "#fff"; ctx.font = "18px sans-serif"; ctx.textAlign = "center";
     ctx.fillText("Skip", skipBox.x+skipBox.w/2, skipBox.y+skipBox.h*0.65);
-    if (recalibrateBtn.holdMs >= HOVER_MS) {
-      recalibrateBtn.holdMs = 0; recalibrateBtn.occupant = null;
+    if (level3SkipBtn.holdMs >= HOVER_MS) {
+      level3SkipBtn.holdMs = 0; level3SkipBtn.occupant = null;
       level3IntroVideo.pause();
       enterLevel3Briefing();
     }
+    drawLevel3DebugReadout();
     requestAnimationFrame(loop);
     return;
   }
@@ -1932,6 +1959,7 @@ function loop() {
     updateActionButtons(dtMs, cursors);
     drawActionButtons();
     drawHandCursors();
+    drawLevel3DebugReadout();
     requestAnimationFrame(loop);
     return;
   }
