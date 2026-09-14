@@ -1776,7 +1776,44 @@ canvas.addEventListener("click", (e) => {
 
 let lastFrameTime = performance.now();
 
+let lastGoodMode = null;
 function loop() {
+  try {
+    lastGoodMode = mode;
+    loopInner();
+  } catch (err) {
+    console.error("Render loop error:", err);
+    ctx.fillStyle = "rgba(0,0,0,0.85)";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = "#ff5555";
+    ctx.font = "bold 20px monospace";
+    ctx.textAlign = "left";
+    const msg = `ERROR in mode "${lastGoodMode}": ${err && err.message ? err.message : err}`;
+    wrapText(msg, 20, 60, canvas.width - 40, 26);
+    ctx.fillStyle = "#fff";
+    ctx.font = "16px monospace";
+    ctx.fillText("(this text is the actual bug - please send a screenshot)", 20, canvas.height - 30);
+    requestAnimationFrame(loop);
+  }
+}
+
+function wrapText(text, x, y, maxWidth, lineHeight) {
+  const words = text.split(" ");
+  let line = "";
+  for (const word of words) {
+    const test = line + word + " ";
+    if (ctx.measureText(test).width > maxWidth && line) {
+      ctx.fillText(line, x, y);
+      line = word + " ";
+      y += lineHeight;
+    } else {
+      line = test;
+    }
+  }
+  ctx.fillText(line, x, y);
+}
+
+function loopInner() {
   const now = performance.now();
   const dtMs = Math.min(100, now - lastFrameTime);
   lastFrameTime = now;
