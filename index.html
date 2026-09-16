@@ -90,6 +90,11 @@ function saveJSON(key, value) {
 let credits = loadNumber("credits", 0);
 let ownedSwords = loadJSON("ownedSwords", ["starter"]);
 let equippedSword = loadJSON("equippedSword", "starter");
+// Levels 3-9 are all the same torii-gate-run mechanic and assets, just
+// repeated as separate content, unlocked sequentially: clearing level N
+// unlocks level N+1. Level 3 itself is always open, matching Levels 1/2.
+let highestUnlockedGateLevel = loadNumber("highestUnlockedGateLevel", 3);
+function saveHighestUnlockedGateLevel() { saveNumber("highestUnlockedGateLevel", highestUnlockedGateLevel); }
 if (!ownedSwords.includes("starter")) ownedSwords.push("starter");
 
 function saveCredits() { saveNumber("credits", credits); }
@@ -266,11 +271,12 @@ function loadLevel3Assets(onDone) {
 // =====================================================================
 
 const RAW_KEYS = ["leftWrist", "rightWrist"];
-let rawTracked = { leftWrist: null, rightWrist: null };
+const SHOULDER_KEYS = ["leftShoulder", "rightShoulder"];
+let rawTracked = { leftWrist: null, rightWrist: null, leftShoulder: null, rightShoulder: null };
 
 let ws = null;
 let mode = "waiting";
-let currentLevel = null; // "level1" | "level2" - which level retry/dying flows apply to
+let currentLevel = null; // "level1" | "level2" | "level3" - which level retry/dying flows apply to
 
 function connect(room) {
   ws = new WebSocket(`${SERVER_URL}/?room=${encodeURIComponent(room)}&role=game`);
@@ -281,6 +287,9 @@ function connect(room) {
     if (msg.type === "connected") statusEl.textContent = "Waiting for your phone to join room " + room;
     if (msg.type === "pose" && msg.landmarks) {
       for (const key of RAW_KEYS) {
+        if (msg.landmarks[key]) rawTracked[key] = { x: 1 - msg.landmarks[key].x, y: msg.landmarks[key].y };
+      }
+      for (const key of SHOULDER_KEYS) {
         if (msg.landmarks[key]) rawTracked[key] = { x: 1 - msg.landmarks[key].x, y: msg.landmarks[key].y };
       }
       if (mode === "waiting" && assetsReady) enterCalibration();
@@ -311,7 +320,14 @@ const CALIB_READY_MS = 2000;
 const CALIB_PHASE_MS = 2500;
 const CALIB_PHASES = ["LEFT", "RIGHT", "UP", "DOWN"];
 const CALIB_FREE_MS = CALIB_PHASE_MS * CALIB_PHASES.length;
-const MIN_RANGE = 0.05;
+// A calibration range narrower than this gets expanded to at least this
+// size before being stretched to fill the screen. Without a floor here, a
+// naturally conservative calibration pass (moving less than your true
+// comfortable range, easy to do without a concrete target to reach for)
+// produces a narrow rectangle - and then ordinary small movements and
+// tracking noise get amplified hugely to fill the full screen afterward,
+// which is exactly what feels "erratic" or "hypersensitive" post-calibration.
+const MIN_RANGE = 0.30;
 
 let calib = null;
 
@@ -325,8 +341,10 @@ function resetCalibration() {
     readyTimer: 0,
     trackTimer: 0,
     ranges: { leftWrist: freshRange(), rightWrist: freshRange() },
+    shoulderRange: freshRange(), // shoulder MIDPOINT range - no left/right identity needed for this
     identity: null,
-    rect: null,
+    rect: null,        // wrist mapping - used by hover-select games (Levels 1/2)
+    shoulderRect: null, // shoulder-midpoint mapping - used by lean/lane games (Level 3+)
   };
 }
 resetCalibration();
@@ -347,8 +365,27 @@ function updateCalibration(dtMs) {
       r.minY = Math.min(r.minY, p.y); r.maxY = Math.max(r.maxY, p.y);
       r.sumX += p.x; r.count++;
     }
+    const ls = rawTracked.leftShoulder, rs = rawTracked.rightShoulder;
+    if (ls || rs) {
+      const mx = (ls && rs) ? (ls.x + rs.x) / 2 : (ls || rs).x;
+      const my = (ls && rs) ? (ls.y + rs.y) / 2 : (ls || rs).y;
+      const sr = calib.shoulderRange;
+      sr.minX = Math.min(sr.minX, mx); sr.maxX = Math.max(sr.maxX, mx);
+      sr.minY = Math.min(sr.minY, my); sr.maxY = Math.max(sr.maxY, my);
+      sr.sumX += mx; sr.count++;
+    }
     if (calib.trackTimer >= CALIB_FREE_MS) finishCalibration();
   }
+}
+
+function rectFromRange(r, fallbackMin, fallbackMax) {
+  let xMin = Number.isFinite(r.minX) ? r.minX : fallbackMin;
+  let xMax = Number.isFinite(r.maxX) ? r.maxX : fallbackMax;
+  let yMin = Number.isFinite(r.minY) ? r.minY : fallbackMin;
+  let yMax = Number.isFinite(r.maxY) ? r.maxY : fallbackMax;
+  if (xMax - xMin < MIN_RANGE) { const cx=(xMax+xMin)/2; xMin=cx-MIN_RANGE/2; xMax=cx+MIN_RANGE/2; }
+  if (yMax - yMin < MIN_RANGE) { const cy=(yMax+yMin)/2; yMin=cy-MIN_RANGE/2; yMax=cy+MIN_RANGE/2; }
+  return { xMin, xMax, yMin, yMax };
 }
 
 function finishCalibration() {
@@ -375,17 +412,22 @@ function finishCalibration() {
   if (xMax - xMin < MIN_RANGE) { const cx=(xMax+xMin)/2; xMin=cx-MIN_RANGE/2; xMax=cx+MIN_RANGE/2; }
   if (yMax - yMin < MIN_RANGE) { const cy=(yMax+yMin)/2; yMin=cy-MIN_RANGE/2; yMax=cy+MIN_RANGE/2; }
 
-  calib.phase = "done";
   calib.rect = { xMin, xMax, yMin, yMax };
+  calib.shoulderRect = rectFromRange(calib.shoulderRange, 0.3, 0.7);
+
+  calib.phase = "done";
   mode = "hub";
   initHub();
 }
 
-function mapToScreen(p) {
-  const r = calib.rect;
-  const nx = clamp01((p.x - r.xMin) / (r.xMax - r.xMin));
-  const ny = clamp01((p.y - r.yMin) / (r.yMax - r.yMin));
+function mapToScreenWithRect(p, rect) {
+  const nx = clamp01((p.x - rect.xMin) / (rect.xMax - rect.xMin));
+  const ny = clamp01((p.y - rect.yMin) / (rect.yMax - rect.yMin));
   return { x: nx, y: ny };
+}
+
+function mapToScreen(p) {
+  return mapToScreenWithRect(p, calib.rect);
 }
 
 function enterCalibration() {
@@ -776,13 +818,78 @@ function generateQuestion() {
 // HUB (level selector + shop entry)
 // =====================================================================
 
+let hubButtons = [];
+
+function makeHubGrid(items) {
+  const cols = 5;
+  const rows = Math.ceil(items.length / cols);
+  const cellW = canvas.width * 0.17, cellH = canvas.height * 0.15;
+  const gapX = canvas.width * 0.015, gapY = canvas.height * 0.035;
+  const totalW = cols * cellW + (cols - 1) * gapX;
+  const totalH = rows * cellH + (rows - 1) * gapY;
+  const x0 = canvas.width / 2 - totalW / 2;
+  const y0 = canvas.height / 2 - totalH / 2 + canvas.height * 0.03;
+  return items.map((it, i) => {
+    const col = i % cols, row = Math.floor(i / cols);
+    return {
+      label: it.label, onSelect: it.onSelect, locked: !!it.locked,
+      x: x0 + col * (cellW + gapX), y: y0 + row * (cellH + gapY),
+      w: cellW, h: cellH, holdMs: 0, occupant: null,
+    };
+  });
+}
+
+function updateHubButtons(dtMs, cursors) {
+  for (const b of hubButtons) {
+    if (b.locked) continue;
+    let occ = null;
+    for (const c of cursors) if (pointInRect(c.px, c.py, b)) { occ = c.id; break; }
+    if (occ && occ === b.occupant) b.holdMs += dtMs;
+    else { b.occupant = occ; b.holdMs = occ ? dtMs : 0; }
+    if (b.holdMs >= HOVER_MS) {
+      const cb = b.onSelect;
+      hubButtons = [];
+      cb();
+      return;
+    }
+  }
+}
+
+function drawHubButtons() {
+  for (const b of hubButtons) {
+    ctx.fillStyle = b.locked ? "rgba(40,40,45,0.85)" : "#6b4226";
+    roundRect(b.x, b.y, b.w, b.h, 10); ctx.fill();
+    ctx.strokeStyle = b.locked ? "#555" : "#3e2412"; ctx.lineWidth = 3;
+    roundRect(b.x, b.y, b.w, b.h, 10); ctx.stroke();
+
+    ctx.fillStyle = b.locked ? "#777" : "#fff";
+    ctx.font = `bold ${Math.round(b.h * 0.22)}px sans-serif`;
+    ctx.textAlign = "center";
+    ctx.fillText(b.label, b.x + b.w / 2, b.y + b.h * 0.48);
+
+    if (b.locked) {
+      ctx.font = `${Math.round(b.h * 0.15)}px sans-serif`;
+      ctx.fillText("\u{1F512} locked", b.x + b.w / 2, b.y + b.h * 0.72);
+    } else {
+      const pct = Math.min(1, b.holdMs / HOVER_MS);
+      if (pct > 0) {
+        ctx.fillStyle = "rgba(88,166,255,0.5)";
+        ctx.fillRect(b.x, b.y + b.h * (1 - pct), b.w, b.h * pct);
+      }
+    }
+  }
+}
+
 function initHub() {
-  actionButtons = makeActionButtons([
+  const items = [
     { label: "Level 1", onSelect: () => startLevel1() },
     { label: "Level 2", onSelect: () => startLevel2Intro() },
-    { label: "Level 3", onSelect: () => startLevel3() },
-    { label: "Shop", onSelect: () => enterShop() },
-  ]);
+  ];
+  for (let n = 3; n <= 9; n++) {
+    items.push({ label: `Level ${n}`, onSelect: () => startGateLevel(n), locked: n > highestUnlockedGateLevel });
+  }
+  items.push({ label: "Shop", onSelect: () => enterShop() });
+  hubButtons = makeHubGrid(items);
 }
 
 function drawHub(cursors, dtMs) {
@@ -790,12 +897,12 @@ function drawHub(cursors, dtMs) {
   ctx.fillStyle = "rgba(0,0,0,0.35)";
   ctx.fillRect(0, 0, canvas.width, canvas.height);
   ctx.fillStyle = "#fff";
-  ctx.font = "bold 44px sans-serif";
+  ctx.font = "bold 40px sans-serif";
   ctx.textAlign = "center";
-  ctx.fillText("Samurai Math Quest", canvas.width/2, canvas.height*0.28);
+  ctx.fillText("Samurai Math Quest", canvas.width/2, canvas.height*0.16);
   drawCreditsHud();
-  updateActionButtons(dtMs, cursors);
-  drawActionButtons();
+  updateHubButtons(dtMs, cursors);
+  drawHubButtons();
   updateRecalibrateButton(dtMs, cursors);
   drawRecalibrateButton();
   drawHandCursors();
@@ -1143,9 +1250,9 @@ function enterRetryPrompt() {
   mode = "retry_prompt";
   actionButtons = makeActionButtons([
     { label: "Retry", onSelect: () => {
-        if (currentLevel === "level2") startLevel2Intro();
-        else if (currentLevel === "level3") startLevel3();
-        else startLevel1();
+        if (currentLevel === "level1") startLevel1();
+        else if (currentLevel === "level2") startLevel2Intro();
+        else startLevel3(); // any gate-runner level (level3..level9) - activeGateLevelNumber already set
       } },
     { label: "Menu", onSelect: () => { mode = "hub"; initHub(); } },
   ]);
@@ -1424,6 +1531,14 @@ let level3IntroToken = 0;
 let level3DebugBriefingCalls = 0;
 let level3SkipBtn = { holdMs: 0, occupant: null };
 
+let activeGateLevelNumber = 3; // which of Level 3-9 is currently active - all share this exact mechanic/assets
+
+function startGateLevel(n) {
+  activeGateLevelNumber = n;
+  currentLevel = "level" + n;
+  startLevel3();
+}
+
 function startLevel3() {
   if (!level3AssetsReady) {
     mode = "level3_loading";
@@ -1438,7 +1553,6 @@ function startLevel3() {
 }
 
 function beginLevel3Intro() {
-  currentLevel = "level3";
   player = newPlayer();
   mode = "level3_intro_video";
   level3SkipBtn = { holdMs: 0, occupant: null };
@@ -1488,18 +1602,41 @@ function enterLevel3Briefing() {
 }
 
 function laneFromCursor() {
-  if (!calib || !calib.identity || !calib.rect) return 1;
-  const lp = rawTracked[calib.identity.left];
-  const rp = rawTracked[calib.identity.right];
-  if (!lp && !rp) return level3 ? level3.currentLane : 1;
-  let mx;
-  if (lp && rp) mx = (lp.x + rp.x) / 2;
-  else mx = (lp || rp).x;
-  const my = (lp && rp) ? (lp.y + rp.y) / 2 : (lp || rp).y;
-  const screenPos = mapToScreen({ x: mx, y: my });
+  const current = level3 ? level3.currentLane : 1;
+  if (!calib || !calib.shoulderRect) return current;
+
+  // Prefer shoulder midpoint (torso lean) - falls back to wrist midpoint if
+  // shoulders aren't currently visible to the camera (e.g. leaning out of
+  // frame), so a brief tracking gap doesn't leave you stuck.
+  const ls = rawTracked.leftShoulder, rs = rawTracked.rightShoulder;
+  let mx, my, rect;
+  if (ls || rs) {
+    mx = (ls && rs) ? (ls.x + rs.x) / 2 : (ls || rs).x;
+    my = (ls && rs) ? (ls.y + rs.y) / 2 : (ls || rs).y;
+    rect = calib.shoulderRect;
+  } else if (calib.identity && calib.rect) {
+    const lp = rawTracked[calib.identity.left];
+    const rp = rawTracked[calib.identity.right];
+    if (!lp && !rp) return current;
+    mx = (lp && rp) ? (lp.x + rp.x) / 2 : (lp || rp).x;
+    my = (lp && rp) ? (lp.y + rp.y) / 2 : (lp || rp).y;
+    rect = calib.rect;
+  } else {
+    return current;
+  }
+
+  const screenPos = mapToScreenWithRect({ x: mx, y: my }, rect);
   if (level3ClickOverrideLane !== null) return level3ClickOverrideLane;
-  if (screenPos.x < 0.33) return 0;
-  if (screenPos.x > 0.66) return 2;
+
+  // Hysteresis: once in a lane, switching away from it requires crossing a
+  // noticeably wider boundary than the one that put you there. Without this,
+  // resting naturally near a boundary (plus ordinary tracking noise) causes
+  // the lane to flip back and forth every frame.
+  const x = screenPos.x;
+  if (current === 0) return x <= 0.40 ? 0 : (x > 0.66 ? 2 : 1);
+  if (current === 2) return x >= 0.60 ? 2 : (x < 0.33 ? 0 : 1);
+  if (x < 0.28) return 0;
+  if (x > 0.72) return 2;
   return 1;
 }
 
@@ -1578,6 +1715,10 @@ function enterLevel3Outro() {
 
 function enterLevel3Clear() {
   mode = "level3_win";
+  if (activeGateLevelNumber < 9 && activeGateLevelNumber + 1 > highestUnlockedGateLevel) {
+    highestUnlockedGateLevel = activeGateLevelNumber + 1;
+    saveHighestUnlockedGateLevel();
+  }
   actionButtons = makeActionButtons([
     { label: "Play Again", onSelect: () => startLevel3() },
     { label: "Menu", onSelect: () => { mode = "hub"; initHub(); } },
@@ -1695,7 +1836,7 @@ function drawLevel3Playing(dtMs) {
   ctx.font = `${Math.round(canvas.height*0.022)}px sans-serif`;
   ctx.fillStyle = "#fff";
   ctx.textAlign = "left";
-  ctx.fillText(`Encounter ${level3.idx+1}/${level3.sequence.length}  |  Need ${level3.threshold} to pass`, 16, canvas.height*0.06);
+  ctx.fillText(`Level ${activeGateLevelNumber}  |  Encounter ${level3.idx+1}/${level3.sequence.length}  |  Need ${level3.threshold} to pass`, 16, canvas.height*0.06);
 }
 
 function drawLevel3DebugReadout() {
@@ -1720,7 +1861,7 @@ function drawLevel3Briefing() {
   ctx.textAlign = "center";
   ctx.fillStyle = "#fff";
   ctx.font = "bold 34px sans-serif";
-  ctx.fillText("Torii Gate Run", canvas.width/2, canvas.height*0.28);
+  ctx.fillText(`Torii Gate Run - Level ${activeGateLevelNumber}`, canvas.width/2, canvas.height*0.28);
   ctx.font = "24px sans-serif";
   ctx.fillText(`Starting score: ${LEVEL3_BASE_SCORE}`, canvas.width/2, canvas.height*0.36);
   ctx.fillStyle = "#ffe066";
@@ -1748,7 +1889,13 @@ canvas.addEventListener("click", (e) => {
     for (let i = 0; i < plaques.length; i++) if (pointInRect(px, py, layout[i])) { onBossPlaqueSelected(plaques[i].value); return; }
     if (pointInRect(px, py, recalibrateBox())) { resetCalibration(); mode = "calibrating"; return; }
   }
-  if (mode === "hub" && pointInRect(px, py, recalibrateBox())) { resetCalibration(); mode = "calibrating"; return; }
+  if (mode === "hub") {
+    if (pointInRect(px, py, recalibrateBox())) { resetCalibration(); mode = "calibrating"; return; }
+    for (const b of hubButtons) {
+      if (!b.locked && pointInRect(px, py, b)) { const cb = b.onSelect; hubButtons = []; cb(); return; }
+    }
+    return;
+  }
   if (mode === "shop") {
     const layout = shopLayout();
     for (let i = 0; i < SWORDS.length; i++) if (pointInRect(px, py, layout[i])) { buySwordAt(i); return; }
@@ -1858,6 +2005,16 @@ function loopInner() {
       if (!p) continue;
       const x = p.x * canvas.width, y = p.y * canvas.height;
       ctx.beginPath(); ctx.arc(x, y, 26, 0, Math.PI*2); ctx.fillStyle = "#8b949e"; ctx.fill();
+    }
+    const ls = rawTracked.leftShoulder, rs = rawTracked.rightShoulder;
+    if (ls || rs) {
+      const mx = (ls && rs) ? (ls.x + rs.x) / 2 : (ls || rs).x;
+      const my = (ls && rs) ? (ls.y + rs.y) / 2 : (ls || rs).y;
+      const x = mx * canvas.width, y = my * canvas.height;
+      ctx.beginPath(); ctx.arc(x, y, 16, 0, Math.PI*2);
+      ctx.fillStyle = "#a78bfa"; ctx.fill();
+      ctx.fillStyle = "#fff"; ctx.font = "13px sans-serif"; ctx.textAlign = "center";
+      ctx.fillText("body", x, y + 30);
     }
     requestAnimationFrame(loop);
     return;
@@ -2034,7 +2191,7 @@ function loopInner() {
     ctx.fillStyle = "#ffe066";
     ctx.font = "bold 40px sans-serif";
     ctx.textAlign = "center";
-    ctx.fillText("LEVEL 3 CLEAR!", canvas.width/2, canvas.height*0.32);
+    ctx.fillText(`LEVEL ${activeGateLevelNumber} CLEAR!`, canvas.width/2, canvas.height*0.32);
     ctx.font = "24px sans-serif";
     ctx.fillText(`Final score: ${level3.score}`, canvas.width/2, canvas.height*0.40);
     drawCreditsHud();
