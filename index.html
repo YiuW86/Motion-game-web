@@ -317,9 +317,9 @@ document.getElementById("connectBtn").onclick = () => {
 // nothing precise to hit.
 
 const CALIB_READY_MS = 2000;
-const CALIB_PHASE_MS = 2500;
+const CALIB_PHASE_MS = 750;
 const CALIB_PHASES = ["LEFT", "RIGHT", "UP", "DOWN"];
-const CALIB_FREE_MS = CALIB_PHASE_MS * CALIB_PHASES.length;
+const CALIB_FREE_MS = CALIB_PHASE_MS * CALIB_PHASES.length; // 3000ms total
 // A calibration range narrower than this gets expanded to at least this
 // size before being stretched to fill the screen. Without a floor here, a
 // naturally conservative calibration pass (moving less than your true
@@ -648,6 +648,41 @@ function drawRecalibrateButton() {
   }
 }
 
+function menuButtonBox() {
+  const rb = recalibrateBox();
+  return { x: rb.x, y: rb.y + rb.h + 10, w: rb.w, h: rb.h };
+}
+let menuBtn = { holdMs: 0, occupant: null };
+
+function updateMenuButton(dtMs, cursors) {
+  const box = menuButtonBox();
+  let occ = null;
+  for (const c of cursors) if (pointInRect(c.px, c.py, box)) { occ = c.id; break; }
+  if (occ && occ === menuBtn.occupant) menuBtn.holdMs += dtMs;
+  else { menuBtn.occupant = occ; menuBtn.holdMs = occ ? dtMs : 0; }
+  if (menuBtn.holdMs >= HOVER_MS) {
+    menuBtn.holdMs = 0; menuBtn.occupant = null;
+    mode = "hub"; initHub();
+  }
+}
+
+function drawMenuButton() {
+  const box = menuButtonBox();
+  ctx.fillStyle = "rgba(60,60,60,0.75)";
+  roundRect(box.x, box.y, box.w, box.h, 8); ctx.fill();
+  ctx.strokeStyle = "#aaa"; ctx.lineWidth = 2;
+  roundRect(box.x, box.y, box.w, box.h, 8); ctx.stroke();
+  ctx.fillStyle = "#fff";
+  ctx.font = `${Math.round(box.h * 0.24)}px sans-serif`;
+  ctx.textAlign = "center";
+  ctx.fillText("Main Menu", box.x + box.w/2, box.y + box.h*0.6);
+  const pct = Math.min(1, menuBtn.holdMs / HOVER_MS);
+  if (pct > 0) {
+    ctx.fillStyle = "rgba(88,166,255,0.5)";
+    ctx.fillRect(box.x, box.y + box.h*(1-pct), box.w, box.h*pct);
+  }
+}
+
 function drawHandCursor(rawPoint, color, label) {
   if (!rawPoint || !calib || !calib.rect) return;
   const s = mapToScreen(rawPoint);
@@ -889,6 +924,11 @@ function initHub() {
     items.push({ label: `Level ${n}`, onSelect: () => startGateLevel(n), locked: n > highestUnlockedGateLevel });
   }
   items.push({ label: "Shop", onSelect: () => enterShop() });
+  items.push({ label: "Test Mode", onSelect: () => {
+    highestUnlockedGateLevel = 9;
+    saveHighestUnlockedGateLevel();
+    initHub();
+  } });
   hubButtons = makeHubGrid(items);
 }
 
@@ -1879,15 +1919,21 @@ canvas.addEventListener("click", (e) => {
   const px = e.clientX - rect.left;
   const py = e.clientY - rect.top;
 
-  if (mode === "playing" && monsters.length > 0) {
-    const layout = plaqueLayout();
-    for (let i = 0; i < plaques.length; i++) if (pointInRect(px, py, layout[i])) { onPlaqueSelectedLevel1(plaques[i].value); return; }
+  if (mode === "playing") {
+    if (monsters.length > 0) {
+      const layout = plaqueLayout();
+      for (let i = 0; i < plaques.length; i++) if (pointInRect(px, py, layout[i])) { onPlaqueSelectedLevel1(plaques[i].value); return; }
+    }
     if (pointInRect(px, py, recalibrateBox())) { resetCalibration(); mode = "calibrating"; return; }
+    if (pointInRect(px, py, menuButtonBox())) { mode = "hub"; initHub(); return; }
   }
-  if (mode === "level2_playing" && level2 && level2.fireball) {
-    const layout = plaqueLayout();
-    for (let i = 0; i < plaques.length; i++) if (pointInRect(px, py, layout[i])) { onBossPlaqueSelected(plaques[i].value); return; }
+  if (mode === "level2_playing") {
+    if (level2 && level2.fireball) {
+      const layout = plaqueLayout();
+      for (let i = 0; i < plaques.length; i++) if (pointInRect(px, py, layout[i])) { onBossPlaqueSelected(plaques[i].value); return; }
+    }
     if (pointInRect(px, py, recalibrateBox())) { resetCalibration(); mode = "calibrating"; return; }
+    if (pointInRect(px, py, menuButtonBox())) { mode = "hub"; initHub(); return; }
   }
   if (mode === "hub") {
     if (pointInRect(px, py, recalibrateBox())) { resetCalibration(); mode = "calibrating"; return; }
@@ -1906,6 +1952,7 @@ canvas.addEventListener("click", (e) => {
     return;
   }
   if (mode === "level3_playing") {
+    if (pointInRect(px, py, menuButtonBox())) { mode = "hub"; initHub(); return; }
     // Click left third / middle third / right third of the screen to pick a lane.
     if (px < canvas.width / 3) level3ClickOverrideLane = 0;
     else if (px > canvas.width * 2 / 3) level3ClickOverrideLane = 2;
@@ -2054,6 +2101,7 @@ function loopInner() {
     updatePlayerAnim(dtMs);
     updatePlaquesLevel1(dtMs, cursors);
     updateRecalibrateButton(dtMs, cursors);
+    updateMenuButton(dtMs, cursors);
     if (wrongFlashTimer > 0) wrongFlashTimer -= dtMs;
 
     drawBackground();
@@ -2061,6 +2109,7 @@ function loopInner() {
     for (let i = monsters.length - 1; i >= 0; i--) drawMonster(monsters[i], i === 0);
     drawPlaques();
     drawRecalibrateButton();
+    drawMenuButton();
     drawPlayerHud(`${currentStage() ? currentStage().type.toUpperCase() : ""}  ${spawnedInStage}/${currentStage() ? currentStage().count : 0}`);
     drawHandCursors();
 
@@ -2097,6 +2146,7 @@ function loopInner() {
     updateLevel2Playing(dtMs, cursors);
     updatePlayerAnim(dtMs);
     updateRecalibrateButton(dtMs, cursors);
+    updateMenuButton(dtMs, cursors);
     if (wrongFlashTimer > 0) wrongFlashTimer -= dtMs;
 
     drawBackground();
@@ -2105,6 +2155,7 @@ function loopInner() {
     drawFireball();
     if (level2.fireball) drawPlaques();
     drawRecalibrateButton();
+    drawMenuButton();
     drawPlayerHud(`Round ${level2.round + 1}/${LEVEL2_PATTERN.length}`);
     drawHandCursors();
 
@@ -2166,7 +2217,9 @@ function loopInner() {
     updateLevel3Playing(dtMs);
     if (mode !== "level3_playing") { requestAnimationFrame(loop); return; }
     updatePlayerAnim(dtMs);
+    updateMenuButton(dtMs, cursors);
     drawLevel3Playing(dtMs);
+    drawMenuButton();
     drawHandCursors();
     requestAnimationFrame(loop);
     return;
