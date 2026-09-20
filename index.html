@@ -240,30 +240,113 @@ function loadLevel3Assets(onDone) {
     level3LoadProgress.loaded = loaded;
     if (loaded >= 4 && !settled) { settled = true; level3AssetsReady = true; onDone(); }
   }
+  // Guards against double-counting if the real event and the timeout both
+  // fire for the same item, and guarantees loading can never hang forever -
+  // some TV/embedded browsers won't reliably fire either a ready or an error
+  // event for a video they can't decode (unsupported codec/resolution), so
+  // without this, loading would just wait indefinitely with no way out.
+  function markOnce() {
+    let fired = false;
+    return () => { if (fired) return; fired = true; mark(); };
+  }
+  const LOAD_TIMEOUT_MS = 8000;
+  function withTimeout(fn) {
+    setTimeout(fn, LOAD_TIMEOUT_MS);
+  }
 
+  const gateMark = markOnce();
   const gateImg = new Image();
-  gateImg.onload = gateImg.onerror = mark;
+  gateImg.onload = gateImg.onerror = gateMark;
   gateImg.src = "assets/torii_gate.png";
   SINGLE_ASSETS.torii_gate = gateImg;
+  withTimeout(gateMark);
 
+  const bgMark = markOnce();
   const bg = new Image();
-  bg.onload = () => { level3BackgroundImg = bg; mark(); };
-  bg.onerror = mark;
+  bg.onload = () => { level3BackgroundImg = bg; bgMark(); };
+  bg.onerror = bgMark;
   bg.src = "assets/level3_background.jpg";
+  withTimeout(bgMark);
 
+  const introMark = markOnce();
   const introVid = document.createElement("video");
   introVid.muted = true; introVid.playsInline = true; introVid.preload = "auto";
-  introVid.oncanplaythrough = () => { introVid.oncanplaythrough = null; mark(); };
-  introVid.onerror = () => { introVid.onerror = null; mark(); };
+  introVid.oncanplaythrough = () => { introVid.oncanplaythrough = null; introMark(); };
+  introVid.onerror = introMark;
   introVid.src = "assets/level3_intro.mp4";
   level3IntroVideo = introVid;
+  withTimeout(introMark);
 
+  const outroMark = markOnce();
   const outroVid = document.createElement("video");
   outroVid.muted = true; outroVid.playsInline = true; outroVid.preload = "auto";
-  outroVid.oncanplaythrough = () => { outroVid.oncanplaythrough = null; mark(); };
-  outroVid.onerror = () => { outroVid.onerror = null; mark(); };
+  outroVid.oncanplaythrough = () => { outroVid.oncanplaythrough = null; outroMark(); };
+  outroVid.onerror = outroMark;
   outroVid.src = "assets/level3_outro.mp4";
   level3OutroVideo = outroVid;
+  withTimeout(outroMark);
+}
+
+// --- Level 10 assets (dungeon background, tile, 8 character pairs, 10 digit
+// glyphs) - also loaded on demand, same reasoning as Levels 2/3. ---
+let level10AssetsReady = false;
+let level10LoadProgress = { loaded: 0, total: 0 };
+let level10BackgroundImg = null;
+let level10SelectImgs = [];
+let level10BacksideImgs = [];
+let level10DigitImgs = [];
+
+function loadLevel10Assets(onDone) {
+  if (level10AssetsReady) { onDone(); return; }
+  const total = 1 + 1 + 8 + 8 + 10;
+  let loaded = 0;
+  let settled = false;
+  level10LoadProgress = { loaded: 0, total };
+  function mark() {
+    loaded++;
+    level10LoadProgress.loaded = loaded;
+    if (loaded >= total && !settled) { settled = true; level10AssetsReady = true; onDone(); }
+  }
+  function markOnce() { let fired = false; return () => { if (fired) return; fired = true; mark(); }; }
+  function withTimeout(fn) { setTimeout(fn, 8000); }
+
+  const bgMark = markOnce();
+  const bg = new Image();
+  bg.onload = () => { level10BackgroundImg = bg; bgMark(); };
+  bg.onerror = bgMark;
+  bg.src = "assets/level10_background.jpg";
+  withTimeout(bgMark);
+
+  const tileMark = markOnce();
+  const tileImg = new Image();
+  tileImg.onload = tileImg.onerror = () => { SINGLE_ASSETS.level10_tile = tileImg; tileMark(); };
+  tileImg.src = "assets/level10_tile.png";
+  withTimeout(tileMark);
+
+  level10SelectImgs = new Array(8);
+  level10BacksideImgs = new Array(8);
+  for (let i = 0; i < 8; i++) {
+    const sMark = markOnce();
+    const simg = new Image();
+    simg.onload = simg.onerror = () => { level10SelectImgs[i] = simg; sMark(); };
+    simg.src = `assets/level10_select_${i}.png`;
+    withTimeout(sMark);
+
+    const bMark = markOnce();
+    const bimg = new Image();
+    bimg.onload = bimg.onerror = () => { level10BacksideImgs[i] = bimg; bMark(); };
+    bimg.src = `assets/level10_backside_${i}.png`;
+    withTimeout(bMark);
+  }
+
+  level10DigitImgs = new Array(10);
+  for (let d = 0; d < 10; d++) {
+    const dMark = markOnce();
+    const dimg = new Image();
+    dimg.onload = dimg.onerror = () => { level10DigitImgs[d] = dimg; dMark(); };
+    dimg.src = `assets/level10_digit_${d}.png`;
+    withTimeout(dMark);
+  }
 }
 
 // =====================================================================
@@ -923,9 +1006,10 @@ function initHub() {
   for (let n = 3; n <= 9; n++) {
     items.push({ label: `Level ${n}`, onSelect: () => startGateLevel(n), locked: n > highestUnlockedGateLevel });
   }
+  items.push({ label: "Level 10", onSelect: () => startLevel10(), locked: 10 > highestUnlockedGateLevel });
   items.push({ label: "Shop", onSelect: () => enterShop() });
   items.push({ label: "Test Mode", onSelect: () => {
-    highestUnlockedGateLevel = 9;
+    highestUnlockedGateLevel = 10;
     saveHighestUnlockedGateLevel();
     initHub();
   } });
@@ -1292,6 +1376,7 @@ function enterRetryPrompt() {
     { label: "Retry", onSelect: () => {
         if (currentLevel === "level1") startLevel1();
         else if (currentLevel === "level2") startLevel2Intro();
+        else if (currentLevel === "level10") startLevel10();
         else startLevel3(); // any gate-runner level (level3..level9) - activeGateLevelNumber already set
       } },
     { label: "Menu", onSelect: () => { mode = "hub"; initHub(); } },
@@ -1582,6 +1667,7 @@ function startGateLevel(n) {
 function startLevel3() {
   if (!level3AssetsReady) {
     mode = "level3_loading";
+    level3SkipBtn = { holdMs: 0, occupant: null };
     const myToken = ++level3IntroToken;
     loadLevel3Assets(() => {
       if (myToken !== level3IntroToken) return; // a newer request superseded this one
@@ -1755,7 +1841,7 @@ function enterLevel3Outro() {
 
 function enterLevel3Clear() {
   mode = "level3_win";
-  if (activeGateLevelNumber < 9 && activeGateLevelNumber + 1 > highestUnlockedGateLevel) {
+  if (activeGateLevelNumber < 10 && activeGateLevelNumber + 1 > highestUnlockedGateLevel) {
     highestUnlockedGateLevel = activeGateLevelNumber + 1;
     saveHighestUnlockedGateLevel();
   }
@@ -1912,8 +1998,321 @@ function drawLevel3Briefing() {
 }
 
 // =====================================================================
-// Manual mouse-click fallback (for testing without a phone)
+// LEVEL 10 - Character select + shoulder-tracked tile picking
 // =====================================================================
+
+const LEVEL10_TILE_COUNT = 8;
+const LEVEL10_SELECT_HOLD_MS = 3000; // character-select screen: dwell-hold on a panel
+const LEVEL10_ROUND_TIME_MS = 3000;  // tile rounds: get to your tile before this runs out, no dwelling required
+const LEVEL10_TARGET_SUCCESS = 10;
+const LEVEL10_TILE_Y_FRAC = 0.86;
+const LEVEL10_DOOR_X_FRAC = 0.5;
+const LEVEL10_DOOR_Y_FRAC = 0.34;
+const LEVEL10_FALL_MS = 700;
+const LEVEL10_CLEAR_BONUS = 150;
+const LEVEL10_CHAR_NAMES = ["Samurai", "Ninja", "Archer", "Priestess", "Monk", "Witch", "Warrior", "Umbrella Girl"];
+
+let level10 = null;
+
+// Equation generator constrained to a single-digit result (0-9), to match
+// the single-glyph door numbers.
+function generateLevel10Equation() {
+  const ops = ["+", "-", "*", "/"];
+  const op = ops[Math.floor(Math.random() * ops.length)];
+  let a, b, answer, text;
+  if (op === "+") {
+    a = Math.floor(Math.random() * 10);
+    b = Math.floor(Math.random() * (10 - a));
+    answer = a + b; text = `${a} + ${b}`;
+  } else if (op === "-") {
+    a = Math.floor(Math.random() * 10);
+    b = Math.floor(Math.random() * (a + 1));
+    answer = a - b; text = `${a} - ${b}`;
+  } else if (op === "*") {
+    a = Math.floor(Math.random() * 4);
+    const maxB = a > 0 ? Math.floor(9 / a) : 9;
+    b = Math.floor(Math.random() * (maxB + 1));
+    answer = a * b; text = `${a} \u00D7 ${b}`;
+  } else {
+    b = 1 + Math.floor(Math.random() * 9);
+    answer = Math.floor(Math.random() * 10);
+    a = b * answer; text = `${a} \u00F7 ${b}`;
+  }
+  return { text, answer };
+}
+
+function newLevel10Round() {
+  const targetDigit = Math.floor(Math.random() * 10);
+  const correctIdx = Math.floor(Math.random() * LEVEL10_TILE_COUNT);
+  const tiles = [];
+  for (let i = 0; i < LEVEL10_TILE_COUNT; i++) {
+    if (i === correctIdx) {
+      let eq, guard = 0;
+      do { eq = generateLevel10Equation(); guard++; } while (eq.answer !== targetDigit && guard < 200);
+      if (eq.answer !== targetDigit) eq = { text: `${targetDigit} + 0`, answer: targetDigit };
+      tiles.push(eq);
+    } else {
+      tiles.push(generateLevel10Equation());
+    }
+  }
+  level10.targetDigit = targetDigit;
+  level10.tiles = tiles;
+  // Reset to a neutral starting position for the new round - every round is
+  // an equal race back out to whichever tile you need this time.
+  level10.currentSlot = 4;
+  level10.displayX = level10TileLayout()[4];
+  level10.roundTimer = 0;
+}
+
+function startLevel10() {
+  if (!level10AssetsReady) {
+    mode = "level10_loading";
+    loadLevel10Assets(() => { beginLevel10Select(); });
+    return;
+  }
+  beginLevel10Select();
+}
+
+function beginLevel10Select() {
+  currentLevel = "level10";
+  level10 = {
+    selectedChar: null,
+    selectHold: Array.from({ length: 8 }, () => ({ holdMs: 0, occupant: null })),
+    currentSlot: 4, displayX: 0, roundTimer: 0,
+    targetDigit: 0, tiles: [], successCount: 0, fallTimer: 0,
+  };
+  mode = "level10_select";
+}
+
+function beginLevel10Playing() {
+  newLevel10Round();
+  mode = "level10_playing";
+}
+
+function level10SelectLayout() {
+  const cols = 4, rows = 2;
+  const cellW = canvas.width * 0.20, cellH = canvas.height * 0.38;
+  const gapX = canvas.width * 0.015, gapY = canvas.height * 0.02;
+  const totalW = cols * cellW + (cols - 1) * gapX;
+  const totalH = rows * cellH + (rows - 1) * gapY;
+  const x0 = canvas.width / 2 - totalW / 2;
+  const y0 = canvas.height / 2 - totalH / 2 + canvas.height * 0.03;
+  const boxes = [];
+  for (let i = 0; i < 8; i++) {
+    const c = i % cols, r = Math.floor(i / cols);
+    boxes.push({ x: x0 + c * (cellW + gapX), y: y0 + r * (cellH + gapY), w: cellW, h: cellH });
+  }
+  return boxes;
+}
+
+function level10TileLayout() {
+  const n = LEVEL10_TILE_COUNT;
+  const tileW = canvas.width * 0.09;
+  const totalW = canvas.width * 0.92;
+  const gap = (totalW - n * tileW) / (n - 1);
+  const x0 = canvas.width * 0.04;
+  const positions = [];
+  for (let i = 0; i < n; i++) positions.push(x0 + i * (tileW + gap) + tileW / 2);
+  return positions;
+}
+
+// Shoulder-midpoint mapped through the shoulder calibration rect, in pixel
+// coordinates - used both for the character-select hover and for tile
+// picking during gameplay.
+function level10ShoulderScreenPos() {
+  if (!calib || !calib.shoulderRect) return null;
+  const ls = rawTracked.leftShoulder, rs = rawTracked.rightShoulder;
+  if (!ls && !rs) return null;
+  const mx = (ls && rs) ? (ls.x + rs.x) / 2 : (ls || rs).x;
+  const my = (ls && rs) ? (ls.y + rs.y) / 2 : (ls || rs).y;
+  const p = mapToScreenWithRect({ x: mx, y: my }, calib.shoulderRect);
+  return { px: p.x * canvas.width, py: p.y * canvas.height };
+}
+
+function updateLevel10Select(dtMs, cursors) {
+  const boxes = level10SelectLayout();
+  for (let i = 0; i < 8; i++) {
+    const hold = level10.selectHold[i];
+    let occ = null;
+    for (const c of cursors) if (pointInRect(c.px, c.py, boxes[i])) { occ = c.id; break; }
+    if (occ && occ === hold.occupant) hold.holdMs += dtMs;
+    else { hold.occupant = occ; hold.holdMs = occ ? dtMs : 0; }
+    if (hold.holdMs >= LEVEL10_SELECT_HOLD_MS) {
+      level10.selectedChar = i;
+      beginLevel10Playing();
+      return;
+    }
+  }
+}
+
+function drawLevel10Select(cursors) {
+  const cw = canvas.width, ch = canvas.height;
+  if (level10BackgroundImg) {
+    const iw = level10BackgroundImg.naturalWidth, ih = level10BackgroundImg.naturalHeight;
+    const scale = Math.max(cw / iw, ch / ih);
+    ctx.drawImage(level10BackgroundImg, (cw - iw*scale)/2, (ch - ih*scale)/2, iw*scale, ih*scale);
+  } else { ctx.fillStyle = "#0d1117"; ctx.fillRect(0, 0, cw, ch); }
+  ctx.fillStyle = "rgba(0,0,0,0.35)";
+  ctx.fillRect(0, 0, cw, ch);
+
+  ctx.fillStyle = "#fff";
+  ctx.font = "bold 38px sans-serif";
+  ctx.textAlign = "center";
+  ctx.fillText("Select your character", cw/2, ch*0.09);
+
+  const boxes = level10SelectLayout();
+  for (let i = 0; i < 8; i++) {
+    const box = boxes[i];
+    const img = level10SelectImgs[i];
+    const hovered = cursors.some(c => pointInRect(c.px, c.py, box));
+    if (img && img.naturalWidth) {
+      const ih2 = box.h * 0.85, iw2 = ih2 * (img.naturalWidth / img.naturalHeight);
+      const ix = box.x + box.w/2 - iw2/2, iy = box.y + box.h*0.03;
+      ctx.drawImage(img, ix, iy, iw2, ih2);
+      if (!hovered) { ctx.fillStyle = "rgba(0,0,0,0.78)"; ctx.fillRect(ix, iy, iw2, ih2); }
+    }
+    ctx.strokeStyle = hovered ? "#ffe066" : "#555";
+    ctx.lineWidth = hovered ? 4 : 2;
+    roundRect(box.x, box.y, box.w, box.h, 10); ctx.stroke();
+    ctx.fillStyle = "#fff";
+    ctx.font = "16px sans-serif";
+    ctx.fillText(LEVEL10_CHAR_NAMES[i], box.x + box.w/2, box.y + box.h*0.97);
+    if (hovered) {
+      const pct = Math.min(1, level10.selectHold[i].holdMs / LEVEL10_SELECT_HOLD_MS);
+      ctx.fillStyle = "rgba(88,166,255,0.5)";
+      ctx.fillRect(box.x, box.y + box.h*(1-pct), box.w, box.h*pct);
+    }
+  }
+  drawHandCursors();
+}
+
+function level10SlotFromShoulder() {
+  const pos = level10ShoulderScreenPos();
+  if (!pos) return level10.currentSlot;
+  const nx = clamp01(pos.px / canvas.width);
+  let slot = Math.floor(nx * LEVEL10_TILE_COUNT);
+  return Math.max(0, Math.min(LEVEL10_TILE_COUNT - 1, slot));
+}
+
+function resolveLevel10Tile() {
+  const eq = level10.tiles[level10.currentSlot];
+  if (eq.answer === level10.targetDigit) {
+    level10.successCount++;
+    if (level10.successCount >= LEVEL10_TARGET_SUCCESS) {
+      enterLevel10Win();
+    } else {
+      newLevel10Round(); // also resets roundTimer/currentSlot for the fresh round
+    }
+  } else {
+    mode = "level10_falling";
+    level10.fallTimer = 0;
+  }
+}
+
+function updateLevel10Playing(dtMs) {
+  // No more dwelling required - just get to the tile you want before the
+  // clock runs out. Whichever tile you're standing on the instant the timer
+  // hits zero is what gets submitted, so arriving early and settling in is
+  // safer than a last-instant scramble.
+  level10.currentSlot = level10SlotFromShoulder();
+  const positions = level10TileLayout();
+  const alpha = 1 - Math.exp(-dtMs / 150);
+  level10.displayX += (positions[level10.currentSlot] - level10.displayX) * alpha;
+
+  level10.roundTimer += dtMs;
+  if (level10.roundTimer >= LEVEL10_ROUND_TIME_MS) resolveLevel10Tile();
+}
+
+function drawLevel10SceneBase() {
+  const cw = canvas.width, ch = canvas.height;
+  if (level10BackgroundImg) {
+    const iw = level10BackgroundImg.naturalWidth, ih = level10BackgroundImg.naturalHeight;
+    const scale = Math.max(cw / iw, ch / ih);
+    ctx.drawImage(level10BackgroundImg, (cw - iw*scale)/2, (ch - ih*scale)/2, iw*scale, ih*scale);
+  } else { ctx.fillStyle = "#0d1117"; ctx.fillRect(0, 0, cw, ch); }
+
+  const digitImg = level10DigitImgs[level10.targetDigit];
+  if (digitImg && digitImg.naturalWidth) {
+    const h = ch * 0.14, w = h * (digitImg.naturalWidth / digitImg.naturalHeight);
+    ctx.drawImage(digitImg, cw*LEVEL10_DOOR_X_FRAC - w/2, ch*LEVEL10_DOOR_Y_FRAC - h/2, w, h);
+  }
+
+  const positions = level10TileLayout();
+  const tileImg = SINGLE_ASSETS.level10_tile;
+  for (let i = 0; i < LEVEL10_TILE_COUNT; i++) {
+    const cx = positions[i], cy = ch * LEVEL10_TILE_Y_FRAC;
+    if (tileImg && tileImg.naturalWidth) {
+      const tw = cw * 0.105, th = tw * (tileImg.naturalHeight / tileImg.naturalWidth);
+      ctx.drawImage(tileImg, cx - tw/2, cy - th/2, tw, th);
+    }
+    const eq = level10.tiles[i];
+    if (eq) {
+      ctx.font = `bold ${Math.round(ch*0.026)}px sans-serif`;
+      ctx.fillStyle = "#fff"; ctx.textAlign = "center";
+      ctx.strokeStyle = "#000"; ctx.lineWidth = 3;
+      ctx.strokeText(eq.text, cx, cy + ch*0.01);
+      ctx.fillText(eq.text, cx, cy + ch*0.01);
+    }
+  }
+}
+
+function drawLevel10Playing() {
+  drawLevel10SceneBase();
+  const img = level10BacksideImgs[level10.selectedChar];
+  if (img && img.naturalWidth) {
+    const h = canvas.height * 0.22, w = h * (img.naturalWidth / img.naturalHeight);
+    ctx.drawImage(img, level10.displayX - w/2, canvas.height*LEVEL10_TILE_Y_FRAC - h*0.85, w, h);
+  }
+
+  // Countdown bar: how much of your 3 seconds is left this round. Shrinks
+  // and shifts from green to red as the deadline approaches.
+  const remainingPct = clamp01(1 - level10.roundTimer / LEVEL10_ROUND_TIME_MS);
+  const barW = canvas.width * 0.4, barH = canvas.height * 0.03;
+  const barX = canvas.width/2 - barW/2, barY = canvas.height * 0.09;
+  ctx.fillStyle = "rgba(0,0,0,0.5)";
+  ctx.fillRect(barX, barY, barW, barH);
+  const barColor = remainingPct > 0.5 ? "#2ecc71" : (remainingPct > 0.2 ? "#f1c40f" : "#e74c3c");
+  ctx.fillStyle = barColor;
+  ctx.fillRect(barX, barY, barW * remainingPct, barH);
+  ctx.strokeStyle = "#fff"; ctx.lineWidth = 2;
+  ctx.strokeRect(barX, barY, barW, barH);
+  ctx.font = `bold ${Math.round(canvas.height*0.026)}px sans-serif`;
+  ctx.fillStyle = "#fff"; ctx.textAlign = "center";
+  ctx.fillText(`${(Math.max(0, LEVEL10_ROUND_TIME_MS - level10.roundTimer) / 1000).toFixed(1)}s`, canvas.width/2, barY - 8);
+
+  ctx.font = `${Math.round(canvas.height*0.026)}px sans-serif`;
+  ctx.fillStyle = "#fff"; ctx.textAlign = "center";
+  ctx.fillText(`Correct: ${level10.successCount}/${LEVEL10_TARGET_SUCCESS}`, canvas.width/2, canvas.height*0.05);
+}
+
+function updateLevel10Falling(dtMs) {
+  level10.fallTimer += dtMs;
+  if (level10.fallTimer >= LEVEL10_FALL_MS) enterDying();
+}
+
+function drawLevel10Falling() {
+  drawLevel10SceneBase();
+  const pct = clamp01(level10.fallTimer / LEVEL10_FALL_MS);
+  const img = level10BacksideImgs[level10.selectedChar];
+  if (img && img.naturalWidth) {
+    const h = canvas.height * 0.22, w = h * (img.naturalWidth / img.naturalHeight);
+    const x = level10.displayX - w/2;
+    const y = canvas.height*LEVEL10_TILE_Y_FRAC - h*0.85 + pct * canvas.height * 0.6;
+    ctx.save();
+    ctx.globalAlpha = Math.max(0, 1 - pct * 0.9);
+    ctx.drawImage(img, x, y, w, h);
+    ctx.restore();
+  }
+}
+
+function enterLevel10Win() {
+  mode = "level10_win";
+  credits += LEVEL10_CLEAR_BONUS; saveCredits();
+  actionButtons = makeActionButtons([
+    { label: "Play Again", onSelect: () => startLevel10() },
+    { label: "Menu", onSelect: () => { mode = "hub"; initHub(); } },
+  ]);
+}
 canvas.addEventListener("click", (e) => {
   const rect = canvas.getBoundingClientRect();
   const px = e.clientX - rect.left;
@@ -1946,6 +2345,11 @@ canvas.addEventListener("click", (e) => {
     const layout = shopLayout();
     for (let i = 0; i < SWORDS.length; i++) if (pointInRect(px, py, layout[i])) { buySwordAt(i); return; }
   }
+  if (mode === "level3_loading") {
+    level3AssetsReady = true;
+    beginLevel3Intro();
+    return;
+  }
   if (mode === "level3_intro_video") {
     level3IntroVideo.pause();
     enterLevel3Briefing();
@@ -1958,6 +2362,17 @@ canvas.addEventListener("click", (e) => {
     else if (px > canvas.width * 2 / 3) level3ClickOverrideLane = 2;
     else level3ClickOverrideLane = 1;
     setTimeout(() => { level3ClickOverrideLane = null; }, 50);
+  }
+  if (mode === "level10_select") {
+    if (pointInRect(px, py, menuButtonBox())) { mode = "hub"; initHub(); return; }
+    const boxes = level10SelectLayout();
+    for (let i = 0; i < 8; i++) if (pointInRect(px, py, boxes[i])) { level10.selectedChar = i; beginLevel10Playing(); return; }
+  }
+  if (mode === "level10_playing") {
+    if (pointInRect(px, py, menuButtonBox())) { mode = "hub"; initHub(); return; }
+    if (pointInRect(px, py, recalibrateBox())) { resetCalibration(); mode = "calibrating"; return; }
+    const slot = Math.max(0, Math.min(LEVEL10_TILE_COUNT - 1, Math.floor(px / canvas.width * LEVEL10_TILE_COUNT)));
+    level10.currentSlot = slot;
   }
   for (const b of actionButtons) {
     if (pointInRect(px, py, b)) { const cb = b.onSelect; actionButtons = []; cb(); return; }
@@ -2176,6 +2591,30 @@ function loopInner() {
     ctx.fillText("Loading Level 3...", canvas.width/2, canvas.height*0.46);
     ctx.font = "20px sans-serif";
     ctx.fillText(`${level3LoadProgress.loaded}/${level3LoadProgress.total}`, canvas.width/2, canvas.height*0.53);
+
+    const skipW = canvas.width*0.14, skipH = canvas.height*0.07;
+    const skipBox = { x: canvas.width/2 - skipW/2, y: canvas.height*0.62, w: skipW, h: skipH };
+    let occ = null;
+    for (const c of cursors) if (pointInRect(c.px, c.py, skipBox)) { occ = c.id; break; }
+    if (occ && occ === level3SkipBtn.occupant) level3SkipBtn.holdMs += dtMs;
+    else { level3SkipBtn.occupant = occ; level3SkipBtn.holdMs = occ ? dtMs : 0; }
+    ctx.fillStyle = "rgba(255,255,255,0.15)";
+    roundRect(skipBox.x, skipBox.y, skipBox.w, skipBox.h, 8); ctx.fill();
+    ctx.strokeStyle = "#888"; ctx.lineWidth = 2;
+    roundRect(skipBox.x, skipBox.y, skipBox.w, skipBox.h, 8); ctx.stroke();
+    ctx.fillStyle = "#fff"; ctx.font = "16px sans-serif";
+    ctx.fillText("Skip waiting", skipBox.x+skipBox.w/2, skipBox.y+skipBox.h*0.63);
+    const skipPct = Math.min(1, level3SkipBtn.holdMs / HOVER_MS);
+    if (skipPct > 0) {
+      ctx.fillStyle = "rgba(88,166,255,0.5)";
+      ctx.fillRect(skipBox.x, skipBox.y + skipBox.h*(1-skipPct), skipBox.w, skipBox.h*skipPct);
+    }
+    if (level3SkipBtn.holdMs >= HOVER_MS) {
+      level3SkipBtn.holdMs = 0; level3SkipBtn.occupant = null;
+      level3AssetsReady = true;
+      beginLevel3Intro();
+    }
+
     drawLevel3DebugReadout();
     requestAnimationFrame(loop);
     return;
@@ -2255,11 +2694,77 @@ function loopInner() {
     return;
   }
 
+  if (mode === "level10_loading") {
+    ctx.fillStyle = "#0d1117";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = "#fff";
+    ctx.font = "bold 30px sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("Loading Level 10...", canvas.width/2, canvas.height*0.46);
+    ctx.font = "20px sans-serif";
+    ctx.fillText(`${level10LoadProgress.loaded}/${level10LoadProgress.total}`, canvas.width/2, canvas.height*0.53);
+    requestAnimationFrame(loop);
+    return;
+  }
+
+  if (mode === "level10_select") {
+    updateLevel10Select(dtMs, cursors);
+    if (mode !== "level10_select") { requestAnimationFrame(loop); return; }
+    drawLevel10Select(cursors);
+    updateMenuButton(dtMs, cursors);
+    drawMenuButton();
+    requestAnimationFrame(loop);
+    return;
+  }
+
+  if (mode === "level10_playing") {
+    updateLevel10Playing(dtMs);
+    if (mode !== "level10_playing") { requestAnimationFrame(loop); return; }
+    drawLevel10Playing();
+    updateMenuButton(dtMs, cursors);
+    updateRecalibrateButton(dtMs, cursors);
+    drawMenuButton();
+    drawRecalibrateButton();
+    requestAnimationFrame(loop);
+    return;
+  }
+
+  if (mode === "level10_falling") {
+    updateLevel10Falling(dtMs);
+    drawLevel10Falling();
+    requestAnimationFrame(loop);
+    return;
+  }
+
+  if (mode === "level10_win") {
+    if (level10BackgroundImg) {
+      const cw = canvas.width, ch = canvas.height;
+      const iw = level10BackgroundImg.naturalWidth, ih = level10BackgroundImg.naturalHeight;
+      const scale = Math.max(cw / iw, ch / ih);
+      ctx.drawImage(level10BackgroundImg, (cw - iw*scale)/2, (ch - ih*scale)/2, iw*scale, ih*scale);
+    }
+    ctx.fillStyle = "rgba(0,0,0,0.45)";
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = "#ffe066";
+    ctx.font = "bold 40px sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("LEVEL 10 CLEAR!", canvas.width/2, canvas.height*0.32);
+    drawCreditsHud();
+    updateActionButtons(dtMs, cursors);
+    drawActionButtons();
+    requestAnimationFrame(loop);
+    return;
+  }
+
   if (mode === "dying") {
-    drawBackground();
-    drawPlayer({});
-    if (currentLevel === "level1") { for (let i = monsters.length - 1; i >= 0; i--) drawMonster(monsters[i], i === 0); }
-    else if (currentLevel === "level2") { drawOniOh(); drawFireball(); }
+    if (currentLevel === "level10") {
+      drawLevel10SceneBase();
+    } else {
+      drawBackground();
+      drawPlayer({});
+      if (currentLevel === "level1") { for (let i = monsters.length - 1; i >= 0; i--) drawMonster(monsters[i], i === 0); }
+      else if (currentLevel === "level2") { drawOniOh(); drawFireball(); }
+    }
     fadeTimer += dtMs;
     const pct = Math.min(1, fadeTimer / FADE_MS);
     ctx.fillStyle = `rgba(0,0,0,${pct})`;
