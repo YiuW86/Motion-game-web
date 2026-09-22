@@ -57,45 +57,104 @@ const SERVER_URL = "wss://motion-relay-server-eu.onrender.com";
 function clamp01(v) { return Math.max(0, Math.min(1, v)); }
 
 // =====================================================================
-// Persistence (credits, owned swords, equipped sword)
+// Persistence (per-profile: credits, owned swords, equipped sword, progress,
+// accuracy stats)
 // =====================================================================
 // This is a real page you host yourself (not a sandboxed Claude artifact),
 // so localStorage is the normal, correct tool here. It's scoped to your
-// browser/device, not a cloud account - namespaced keys below to avoid
-// clashing with any other project you might host under the same domain.
+// browser/device, not a cloud account.
+//
+// Profiles are phone-linked: the phone remembers WHO exists (id/name/avatar)
+// and tells the TV on connect. The TV is where the actual progress data
+// lives, namespaced by profile id below - so the same phone always sees its
+// own profiles, but progress itself doesn't currently follow a profile to a
+// different TV (that would need a real sync protocol, a deliberate later
+// step, not folded in here).
 
-const STORAGE_PREFIX = "samuraiMathQuest_v1_";
+const STORAGE_BASE = "samuraiMathQuest_v1_";
+let activeProfileId = null; // set once a profile is chosen/created; nothing is loaded/saved before this
+
+function storageKey(key) {
+  return `${STORAGE_BASE}p_${activeProfileId}_${key}`;
+}
 
 function loadNumber(key, fallback) {
   try {
-    const v = localStorage.getItem(STORAGE_PREFIX + key);
+    const v = localStorage.getItem(storageKey(key));
     if (v === null) return fallback;
     const n = Number(v);
     return Number.isFinite(n) ? n : fallback;
   } catch (e) { return fallback; }
 }
 function saveNumber(key, value) {
-  try { localStorage.setItem(STORAGE_PREFIX + key, String(value)); } catch (e) {}
+  try { localStorage.setItem(storageKey(key), String(value)); } catch (e) {}
 }
 function loadJSON(key, fallback) {
   try {
-    const v = localStorage.getItem(STORAGE_PREFIX + key);
+    const v = localStorage.getItem(storageKey(key));
     return v === null ? fallback : JSON.parse(v);
   } catch (e) { return fallback; }
 }
 function saveJSON(key, value) {
-  try { localStorage.setItem(STORAGE_PREFIX + key, JSON.stringify(value)); } catch (e) {}
+  try { localStorage.setItem(storageKey(key), JSON.stringify(value)); } catch (e) {}
 }
 
-let credits = loadNumber("credits", 0);
-let ownedSwords = loadJSON("ownedSwords", ["starter"]);
-let equippedSword = loadJSON("equippedSword", "starter");
+// These hold sensible empty defaults until loadProfileData() actually runs
+// (right after a profile is chosen) - nothing reads/writes real data before
+// a profile is active.
+let credits = 0;
+let ownedSwords = ["starter"];
+let equippedSword = "starter";
 // Levels 3-9 are all the same torii-gate-run mechanic and assets, just
 // repeated as separate content, unlocked sequentially: clearing level N
 // unlocks level N+1. Level 3 itself is always open, matching Levels 1/2.
-let highestUnlockedGateLevel = loadNumber("highestUnlockedGateLevel", 3);
+let highestUnlockedGateLevel = 3;
+let profileStats = null; // see makeEmptyStats() below
+
+function makeEmptyStats() {
+  return {
+    opAccuracy: {
+      "+": { correct: 0, total: 0 }, "-": { correct: 0, total: 0 },
+      "\u00D7": { correct: 0, total: 0 }, "\u00F7": { correct: 0, total: 0 },
+    },
+    gateOptimal: { correct: 0, total: 0 },   // Levels 3-9: picked the better of the two gate options
+    obstacleAvoid: { avoided: 0, total: 0 }, // Levels 3-9: dodged the zombie/oni
+    timesPlayed: 0,
+  };
+}
+
+function loadProfileData() {
+  credits = loadNumber("credits", 0);
+  ownedSwords = loadJSON("ownedSwords", ["starter"]);
+  equippedSword = loadJSON("equippedSword", "starter");
+  highestUnlockedGateLevel = loadNumber("highestUnlockedGateLevel", 3);
+  profileStats = loadJSON("stats", makeEmptyStats());
+  if (!ownedSwords.includes("starter")) ownedSwords.push("starter");
+  profileStats.timesPlayed++;
+  saveStats();
+}
+
 function saveHighestUnlockedGateLevel() { saveNumber("highestUnlockedGateLevel", highestUnlockedGateLevel); }
-if (!ownedSwords.includes("starter")) ownedSwords.push("starter");
+function saveStats() { saveJSON("stats", profileStats); }
+
+function recordOpStat(op, wasCorrect) {
+  if (!profileStats || !profileStats.opAccuracy[op]) return;
+  profileStats.opAccuracy[op].total++;
+  if (wasCorrect) profileStats.opAccuracy[op].correct++;
+  saveStats();
+}
+function recordGateStat(wasOptimal) {
+  if (!profileStats) return;
+  profileStats.gateOptimal.total++;
+  if (wasOptimal) profileStats.gateOptimal.correct++;
+  saveStats();
+}
+function recordObstacleStat(wasAvoided) {
+  if (!profileStats) return;
+  profileStats.obstacleAvoid.total++;
+  if (wasAvoided) profileStats.obstacleAvoid.avoided++;
+  saveStats();
+}
 
 function saveCredits() { saveNumber("credits", credits); }
 function saveOwnedSwords() { saveJSON("ownedSwords", ownedSwords); }
@@ -173,6 +232,7 @@ const SINGLE_ASSETS_MANIFEST = [
   "fireball",
   "sword_frostbite", "sword_solar_fang", "sword_jade_serpent", "sword_rose_thorn",
   "sword_azure_reaver", "sword_sky_piercer", "sword_void_cleaver", "sword_crimson_fang",
+  "avatar_0", "avatar_1", "avatar_2", "avatar_3", "avatar_4", "avatar_5", "avatar_6", "avatar_7",
 ];
 
 const ASSET_FRAMES = {};
@@ -368,6 +428,9 @@ function connect(room) {
     let msg;
     try { msg = JSON.parse(event.data); } catch (e) { return; }
     if (msg.type === "connected") statusEl.textContent = "Waiting for your phone to join room " + room;
+    if (msg.type === "profiles" && Array.isArray(msg.profiles)) {
+      phoneProfiles = msg.profiles;
+    }
     if (msg.type === "pose" && msg.landmarks) {
       for (const key of RAW_KEYS) {
         if (msg.landmarks[key]) rawTracked[key] = { x: 1 - msg.landmarks[key].x, y: msg.landmarks[key].y };
@@ -499,8 +562,7 @@ function finishCalibration() {
   calib.shoulderRect = rectFromRange(calib.shoulderRange, 0.3, 0.7);
 
   calib.phase = "done";
-  mode = "hub";
-  initHub();
+  enterProfileSelect();
 }
 
 function mapToScreenWithRect(p, rect) {
@@ -519,6 +581,242 @@ function enterCalibration() {
   setupEl.style.display = "none";
   lastFrameTime = performance.now();
   requestAnimationFrame(loop);
+}
+
+// =====================================================================
+// PROFILES - phone-linked identity, chosen/created via hover only (no
+// typing). The phone remembers which profiles exist on it and sends that
+// list on connect; creating a new one sends it back to the phone to save.
+// =====================================================================
+
+const PROFILE_HOVER_MS = 1500;
+const PROFILE_PRESETS = [
+  { avatarIndex: 0, name: "Samurai" }, { avatarIndex: 1, name: "Ninja" },
+  { avatarIndex: 2, name: "Archer" }, { avatarIndex: 3, name: "Priestess" },
+  { avatarIndex: 4, name: "Monk" }, { avatarIndex: 5, name: "Witch" },
+  { avatarIndex: 6, name: "Warrior" }, { avatarIndex: 7, name: "Umbrella Girl" },
+];
+
+let phoneProfiles = [];
+let profileHold = [];
+let profileScreenMode = "choose"; // "choose" (pick existing / add new) | "create" (pick a preset)
+
+function enterProfileSelect() {
+  mode = "profile_select";
+  profileScreenMode = phoneProfiles.length > 0 ? "choose" : "create";
+  profileHold = [];
+}
+
+function profileSelectItems() {
+  if (profileScreenMode === "choose") {
+    return phoneProfiles.map(p => ({ kind: "existing", profile: p }))
+      .concat([{ kind: "create" }]);
+  }
+  return PROFILE_PRESETS.map(p => ({ kind: "preset", preset: p }));
+}
+
+function profilePanelLayout(count) {
+  const cols = Math.min(4, Math.max(1, count));
+  const rows = Math.ceil(count / cols);
+  const cellW = canvas.width * 0.20, cellH = canvas.height * 0.36;
+  const gapX = canvas.width * 0.015, gapY = canvas.height * 0.02;
+  const totalW = cols * cellW + (cols - 1) * gapX;
+  const totalH = rows * cellH + (rows - 1) * gapY;
+  const x0 = canvas.width / 2 - totalW / 2;
+  const y0 = canvas.height / 2 - totalH / 2 + canvas.height * 0.03;
+  const boxes = [];
+  for (let i = 0; i < count; i++) {
+    const c = i % cols, r = Math.floor(i / cols);
+    boxes.push({ x: x0 + c*(cellW+gapX), y: y0 + r*(cellH+gapY), w: cellW, h: cellH });
+  }
+  return boxes;
+}
+
+function generateProfileId() {
+  return "p" + Date.now().toString(36) + Math.floor(Math.random()*1e6).toString(36);
+}
+
+function selectExistingProfile(profile) {
+  activeProfileId = profile.id;
+  loadProfileData();
+  mode = "hub";
+  initHub();
+}
+
+function createNewProfile(preset) {
+  const profile = { id: generateProfileId(), name: preset.name, avatarIndex: preset.avatarIndex };
+  phoneProfiles.push(profile);
+  try { ws && ws.send(JSON.stringify({ type: "add_profile", profile })); } catch (e) {}
+  activeProfileId = profile.id;
+  loadProfileData();
+  mode = "hub";
+  initHub();
+}
+
+function selectProfileItem(item) {
+  if (item.kind === "existing") selectExistingProfile(item.profile);
+  else if (item.kind === "create") { profileScreenMode = "create"; profileHold = []; }
+  else if (item.kind === "preset") createNewProfile(item.preset);
+}
+
+function updateProfileSelect(dtMs, cursors) {
+  const items = profileSelectItems();
+  if (profileHold.length !== items.length) profileHold = items.map(() => ({ holdMs: 0, occupant: null }));
+
+  const boxes = profilePanelLayout(items.length);
+  for (let i = 0; i < items.length; i++) {
+    const hold = profileHold[i];
+    let occ = null;
+    for (const c of cursors) if (pointInRect(c.px, c.py, boxes[i])) { occ = c.id; break; }
+    if (occ && occ === hold.occupant) hold.holdMs += dtMs;
+    else { hold.occupant = occ; hold.holdMs = occ ? dtMs : 0; }
+    if (hold.holdMs >= PROFILE_HOVER_MS) { selectProfileItem(items[i]); return; }
+  }
+}
+
+function drawProfileSelect(cursors) {
+  drawBackground();
+  ctx.fillStyle = "rgba(0,0,0,0.45)";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  ctx.fillStyle = "#fff";
+  ctx.font = "bold 38px sans-serif";
+  ctx.textAlign = "center";
+  ctx.fillText(profileScreenMode === "choose" ? "Who's playing?" : "Create your profile", canvas.width/2, canvas.height*0.10);
+
+  const items = profileSelectItems();
+  const boxes = profilePanelLayout(items.length);
+  for (let i = 0; i < items.length; i++) {
+    const box = boxes[i];
+    const item = items[i];
+    const hold = profileHold[i] || { holdMs: 0 };
+    const hovered = cursors.some(c => pointInRect(c.px, c.py, box));
+
+    ctx.fillStyle = "rgba(30,30,35,0.85)";
+    roundRect(box.x, box.y, box.w, box.h, 10); ctx.fill();
+    ctx.strokeStyle = hovered ? "#ffe066" : "#555";
+    ctx.lineWidth = hovered ? 4 : 2;
+    roundRect(box.x, box.y, box.w, box.h, 10); ctx.stroke();
+
+    if (item.kind === "create") {
+      ctx.fillStyle = "#fff";
+      ctx.font = `bold ${Math.round(box.h*0.16)}px sans-serif`;
+      ctx.fillText("+", box.x+box.w/2, box.y+box.h*0.5);
+      ctx.font = `${Math.round(box.h*0.08)}px sans-serif`;
+      ctx.fillText("New Profile", box.x+box.w/2, box.y+box.h*0.68);
+    } else {
+      const avatarIdx = item.kind === "existing" ? item.profile.avatarIndex : item.preset.avatarIndex;
+      const name = item.kind === "existing" ? item.profile.name : item.preset.name;
+      const img = SINGLE_ASSETS[`avatar_${avatarIdx}`];
+      if (img && img.naturalWidth) {
+        const ih2 = box.h*0.75, iw2 = ih2*(img.naturalWidth/img.naturalHeight);
+        ctx.drawImage(img, box.x+box.w/2-iw2/2, box.y+box.h*0.03, iw2, ih2);
+      }
+      ctx.fillStyle = "#fff";
+      ctx.font = "16px sans-serif";
+      ctx.fillText(name, box.x+box.w/2, box.y+box.h*0.95);
+    }
+
+    if (hovered) {
+      const pct = Math.min(1, hold.holdMs / PROFILE_HOVER_MS);
+      ctx.fillStyle = "rgba(88,166,255,0.5)";
+      ctx.fillRect(box.x, box.y+box.h*(1-pct), box.w, box.h*pct);
+    }
+  }
+  drawHandCursors();
+}
+
+// =====================================================================
+// PARENT REPORT - per-profile accuracy stats
+// =====================================================================
+
+function enterParentReport() {
+  mode = "parent_report";
+  actionButtons = makeActionButtons([{ label: "Back to Menu", onSelect: () => { mode = "hub"; initHub(); } }]);
+}
+
+function drawParentReport(cursors, dtMs) {
+  drawBackground();
+  ctx.fillStyle = "rgba(0,0,0,0.55)";
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  const profile = phoneProfiles.find(p => p.id === activeProfileId);
+  const name = profile ? profile.name : "Player";
+
+  ctx.fillStyle = "#fff";
+  ctx.font = "bold 32px sans-serif";
+  ctx.textAlign = "center";
+  ctx.fillText(`Parent Report - ${name}`, canvas.width/2, canvas.height*0.09);
+
+  if (!profileStats) {
+    ctx.font = "20px sans-serif";
+    ctx.fillText("No data yet - play a level first!", canvas.width/2, canvas.height*0.5);
+    updateActionButtons(dtMs, cursors);
+    drawActionButtons();
+    drawHandCursors();
+    return;
+  }
+
+  ctx.font = "18px sans-serif";
+  ctx.fillText(`Times played: ${profileStats.timesPlayed}`, canvas.width/2, canvas.height*0.15);
+
+  const ops = ["+", "-", "\u00D7", "\u00F7"];
+  const opLabels = { "+": "Addition", "-": "Subtraction", "\u00D7": "Multiplication", "\u00F7": "Division" };
+  const barX0 = canvas.width * 0.14;
+  const barW = canvas.width * 0.72;
+  const barH = canvas.height * 0.045;
+  let y = canvas.height * 0.22;
+
+  ctx.textAlign = "left";
+  ctx.font = "bold 20px sans-serif";
+  ctx.fillText("Math accuracy (Levels 1, 2, 10):", barX0, y);
+  y += canvas.height * 0.045;
+
+  for (const op of ops) {
+    const stat = profileStats.opAccuracy[op];
+    const pct = stat.total > 0 ? stat.correct / stat.total : null;
+    ctx.fillStyle = "rgba(255,255,255,0.15)";
+    ctx.fillRect(barX0, y, barW, barH);
+    if (pct !== null) {
+      ctx.fillStyle = pct > 0.7 ? "#2ecc71" : (pct > 0.4 ? "#f1c40f" : "#e74c3c");
+      ctx.fillRect(barX0, y, barW * pct, barH);
+    }
+    ctx.strokeStyle = "#fff"; ctx.lineWidth = 1.5;
+    ctx.strokeRect(barX0, y, barW, barH);
+    ctx.fillStyle = "#fff";
+    ctx.font = "16px sans-serif";
+    ctx.textAlign = "left";
+    const label = pct !== null
+      ? `${opLabels[op]}: ${Math.round(pct*100)}% (${stat.correct}/${stat.total})`
+      : `${opLabels[op]}: no data yet`;
+    ctx.fillText(label, barX0 + 8, y + barH*0.68);
+    y += barH + canvas.height * 0.018;
+  }
+
+  y += canvas.height * 0.02;
+  ctx.font = "bold 20px sans-serif";
+  ctx.fillText("Strategy (Levels 3-9):", barX0, y);
+  y += canvas.height * 0.04;
+
+  const gate = profileStats.gateOptimal;
+  const gatePct = gate.total > 0 ? gate.correct / gate.total : null;
+  ctx.font = "16px sans-serif";
+  ctx.fillText(
+    gatePct !== null ? `Picked the best gate: ${Math.round(gatePct*100)}% (${gate.correct}/${gate.total})` : "Best-gate picks: no data yet",
+    barX0, y
+  );
+  y += canvas.height * 0.04;
+
+  const obs = profileStats.obstacleAvoid;
+  const obsPct = obs.total > 0 ? obs.avoided / obs.total : null;
+  ctx.fillText(
+    obsPct !== null ? `Avoided obstacles: ${Math.round(obsPct*100)}% (${obs.avoided}/${obs.total})` : "Obstacle avoidance: no data yet",
+    barX0, y
+  );
+
+  updateActionButtons(dtMs, cursors);
+  drawActionButtons();
+  drawHandCursors();
 }
 
 // =====================================================================
@@ -929,7 +1227,8 @@ function generateQuestion() {
     const q = 1 + Math.floor(Math.random() * 9);
     a = b * q; answer = q; text = `${a} \u00F7 ${b}`;
   }
-  return { text, answer };
+  const statOp = op === "*" ? "\u00D7" : (op === "/" ? "\u00F7" : op);
+  return { text, answer, op: statOp };
 }
 
 // =====================================================================
@@ -1008,6 +1307,7 @@ function initHub() {
   }
   items.push({ label: "Level 10", onSelect: () => startLevel10(), locked: 10 > highestUnlockedGateLevel });
   items.push({ label: "Shop", onSelect: () => enterShop() });
+  items.push({ label: "Parent Report", onSelect: () => enterParentReport() });
   items.push({ label: "Test Mode", onSelect: () => {
     highestUnlockedGateLevel = 10;
     saveHighestUnlockedGateLevel();
@@ -1288,7 +1588,9 @@ function updateMonsters(dtMs) {
 function onPlaqueSelectedLevel1(value) {
   if (monsters.length === 0) return;
   const front = monsters[0];
-  if (value === front.question.answer) {
+  const wasCorrect = value === front.question.answer;
+  recordOpStat(front.question.op, wasCorrect);
+  if (wasCorrect) {
     const dmg = Math.round(front.hpMax * front.dmgPct * getDamageMultiplier());
     front.hp = Math.max(0, front.hp - dmg);
     front.hitTimer = HIT_STUN_MS;
@@ -1458,7 +1760,9 @@ function spawnFireball(type) {
 
 function onBossPlaqueSelected(value) {
   if (!level2.fireball) return;
-  if (value === level2.fireball.question.answer) {
+  const wasCorrect = value === level2.fireball.question.answer;
+  recordOpStat(level2.fireball.question.op, wasCorrect);
+  if (wasCorrect) {
     level2.fireball = null;
     triggerPlayerAttack();
     credits += CREDIT_BY_TYPE.onioh_round; saveCredits();
@@ -1769,6 +2073,24 @@ function laneFromCursor() {
 function resolveLevel3Encounter() {
   const enc = level3.sequence[level3.idx];
   const slot = enc.laneContent[level3.currentLane];
+
+  if (enc.type === "gate") {
+    // "Optimal" = the picked lane's resulting score ties or beats every
+    // other option that round (including the empty "skip" lane, whose
+    // result is just staying at the current score - the right move if
+    // both real options were actually worse than doing nothing).
+    let bestScore = -Infinity;
+    for (let lane = 0; lane < 3; lane++) {
+      const content = enc.laneContent[lane];
+      const resultScore = content ? content.fn(level3.score) : level3.score;
+      if (resultScore > bestScore) bestScore = resultScore;
+    }
+    const pickedResultScore = slot ? slot.fn(level3.score) : level3.score;
+    recordGateStat(pickedResultScore === bestScore);
+  } else if (enc.type === "zombie" || enc.type === "oni") {
+    recordObstacleStat(!(slot && slot.hazard));
+  }
+
   if (slot) {
     if (slot.hazard) {
       level3.score -= (slot.kind === "zombie" ? LEVEL3_ZOMBIE_PENALTY : LEVEL3_ONI_PENALTY);
@@ -2038,7 +2360,8 @@ function generateLevel10Equation() {
     answer = Math.floor(Math.random() * 10);
     a = b * answer; text = `${a} \u00F7 ${b}`;
   }
-  return { text, answer };
+  const statOp = op === "*" ? "\u00D7" : (op === "/" ? "\u00F7" : op);
+  return { text, answer, op: statOp };
 }
 
 function newLevel10Round() {
@@ -2196,7 +2519,9 @@ function level10SlotFromShoulder() {
 
 function resolveLevel10Tile() {
   const eq = level10.tiles[level10.currentSlot];
-  if (eq.answer === level10.targetDigit) {
+  const wasCorrect = eq.answer === level10.targetDigit;
+  recordOpStat(eq.op, wasCorrect);
+  if (wasCorrect) {
     level10.successCount++;
     if (level10.successCount >= LEVEL10_TARGET_SUCCESS) {
       enterLevel10Win();
@@ -2333,6 +2658,12 @@ canvas.addEventListener("click", (e) => {
     }
     if (pointInRect(px, py, recalibrateBox())) { resetCalibration(); mode = "calibrating"; return; }
     if (pointInRect(px, py, menuButtonBox())) { mode = "hub"; initHub(); return; }
+  }
+  if (mode === "profile_select") {
+    const items = profileSelectItems();
+    const boxes = profilePanelLayout(items.length);
+    for (let i = 0; i < items.length; i++) if (pointInRect(px, py, boxes[i])) { selectProfileItem(items[i]); return; }
+    return;
   }
   if (mode === "hub") {
     if (pointInRect(px, py, recalibrateBox())) { resetCalibration(); mode = "calibrating"; return; }
@@ -2484,11 +2815,25 @@ function loopInner() {
 
   const cursors = getCursorsPixels();
 
+  if (mode === "profile_select") {
+    updateProfileSelect(dtMs, cursors);
+    if (mode !== "profile_select") { requestAnimationFrame(loop); return; }
+    drawProfileSelect(cursors);
+    requestAnimationFrame(loop);
+    return;
+  }
+
   if (mode === "hub") { drawHub(cursors, dtMs); requestAnimationFrame(loop); return; }
 
   if (mode === "shop") {
     updateShop(dtMs, cursors);
     drawShop(cursors, dtMs);
+    requestAnimationFrame(loop);
+    return;
+  }
+
+  if (mode === "parent_report") {
+    drawParentReport(cursors, dtMs);
     requestAnimationFrame(loop);
     return;
   }
