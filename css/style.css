@@ -863,3 +863,10 @@ body.touch .ach small { font-size: 24px; }
 .planet::before { top: 240px; width: 520px; height: 520px; }
 body.touch .planet-canvas { width: 520px; height: 520px; }
 body.touch .planet::before { top: 260px; width: 560px; height: 560px; }
+
+/* three planets side by side */
+.planet-row { gap: 90px; }
+.planet-canvas { width: 440px; height: 440px; }
+.planet::before { top: 220px; width: 470px; height: 470px; }
+body.touch .planet-canvas { width: 480px; height: 480px; }
+body.touch .planet::before { top: 240px; width: 510px; height: 510px; }

@@ -508,6 +508,7 @@
     'bosses': ['bazen', 'Bosse', 'boss', 'jefes', 'chefes'],
     'Novara': ['Novara', 'Novara', 'Novara', 'Novara', 'Novara'],
     'Cindera': ['Cindera', 'Cindera', 'Cindera', 'Cindera', 'Cindera'],
+    'Prismara': ['Prismara', 'Prismara', 'Prismara', 'Prismara', 'Prismara'],
     'Extra level': ['Extra level', 'Extra-Level', 'Niveau bonus', 'Nivel extra', 'Nível extra'],
     'Starfall Wetlands': ['Sterrenval-moeras', 'Sternfall-Sumpf', 'Marais des Étoiles', 'Pantano Estelar', 'Pântano Estelar'],
     'Unlock all levels': ['Alle levels openen', 'Alle Level freischalten', 'Débloquer tous les niveaux', 'Desbloquear todos los niveles', 'Desbloquear todos os níveis'],
