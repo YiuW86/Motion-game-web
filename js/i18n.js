@@ -511,6 +511,7 @@
     'Prismara': ['Prismara', 'Prismara', 'Prismara', 'Prismara', 'Prismara'],
     'Soon available': ['Binnenkort beschikbaar', 'Bald verfügbar', 'Bientôt disponible', 'Disponible pronto', 'Disponível em breve'],
     'Glimmer Coast': ['Glinsterkust', 'Glitzerküste', 'Côte Scintillante', 'Costa Destellante', 'Costa Cintilante'],
+    'Thunder Spires': ['Donderpieken', 'Donnerspitzen', 'Pics du Tonnerre', 'Agujas del Trueno', 'Picos do Trovão'],
     'Emberfall Rift': ['Gloedkloof', 'Glutspalt', 'Faille des Braises', 'Grieta de Brasas', 'Fenda das Brasas'],
     'Extra level': ['Extra level', 'Extra-Level', 'Niveau bonus', 'Nivel extra', 'Nível extra'],
     'Starfall Wetlands': ['Sterrenval-moeras', 'Sternfall-Sumpf', 'Marais des Étoiles', 'Pantano Estelar', 'Pântano Estelar'],

@@ -1408,7 +1408,8 @@
   const PLANETS = [
     { id: 1, name: 'Novara', img: 'assets/planet1.png', cell: 340, frames: 12, open: true },
     { id: 2, name: 'Cindera', img: 'assets/planet2.png', cell: 400, frames: 12, open: true, soon: true,
-      worlds: [{ name: 'Glimmer Coast', bg: 'assets/cindera1.jpg' }, { name: 'Emberfall Rift', bg: 'assets/cindera2.jpg' }] },
+      worlds: [{ name: 'Glimmer Coast', bg: 'assets/cindera1.jpg' }, { name: 'Emberfall Rift', bg: 'assets/cindera2.jpg' },
+        { name: 'Thunder Spires', bg: 'assets/cindera3.jpg' }] },
     { id: 3, name: 'Prismara', img: 'assets/planet3.png', cell: 370, frames: 12, open: false },
   ];
   PLANETS.forEach((p) => { p.image = new Image(); p.image.src = p.img; });
