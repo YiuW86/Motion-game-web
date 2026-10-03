@@ -1,5 +1,7 @@
 # Star Voyager (MVP)
 
+**Version 3.5** (3 October 2026) — same version as the Android app (star-voyager-v3.5.apk).
+
 A first-person, motion-controlled shooter for the browser. The game runs on a TV or laptop; an Android phone acts as the camera. The phone tracks your body and sends only the keypoints (no video) straight to the game over WebRTC.
 
 ## Files
@@ -14,7 +16,6 @@ js/net.js           WebRTC host (receives data from the phone)
 js/controller.js    Phone side: MediaPipe pose tracking + WebRTC sending
 js/audio.js         Synthesized sound effects
 js/dex.js           Alien guide: facts about every alien and the guide screen
-js/platformer.js    Experimental level 6: the side-scrolling platformer
 js/i18n.js          Languages: all translations of the game's texts
 js/config.js        Your settings (Google Cast App ID, Firebase accounts, licences)
 js/cloud.js         Accounts, cloud save and licence check (Firebase)
@@ -76,7 +77,7 @@ The game has 6 worlds (environments), each with **10 levels**. Levels 1–9 are 
 | Moonlit Cavern | Glide, Nebula, Echo | Echo Monarch |
 | Starfall Wetlands | Orbita, Razor, Vortex | Vortex King |
 
-The **Skyline Run** card is the extra (experimental) platformer level.
+The world cards are a **carousel**: 4–5 big cards are in view; swipe, scroll or use the ‹ › arrows for the rest.
 
 A level can only be played when the level before it is cleared, and a world only opens when every level of the previous world is cleared. **Options → Unlock all levels** opens everything.
 
@@ -85,12 +86,6 @@ Every cleared level earns **1 to 3 stars**, based on health left (counts most), 
 World settings (background, aliens, boss) are in `LEVELS` at the top of `js/level.js`; how the 10 levels of a world get harder is in `GOALS` and `stageConfig`, and the star rules in `starRating`.
 
 Every boss is a giant, crowned version of one of the level's monsters. Blaster hits fill 1 point of the boss bar, net grenades 4. Boss strength per level is the `hp` value in `LEVELS` in `js/level.js`.
-
-## Extra level: Skyline Run (experimental platformer)
-
-The last card on the world screen, **Skyline Run**, is a side-scrolling platformer. The robot runs from left to right through three backgrounds (the dome base, the floating rocks and the crystal pillar); a glowing portal at the end of each one leads to the next. On the floating rocks you have to jump from rock to rock, and at the end jump from the last rock into the portal. The level ends at the great crystal. Aliens walk or float toward you and throw glowing orbs; blast them (or their orbs) to catch them.
-
-Controls: phone **Gamepad** (the phone switches to Jump, Blast, Run and Menu buttons automatically; push the d-pad far to run), or keyboard: arrows or A/D to move, Shift to run, Space to jump, J or a click to blast. Platforms, aliens and portals are set in `SECTIONS` at the top of `js/platformer.js`.
 
 ## Star shop
 
@@ -120,7 +115,7 @@ The **Home** button opens your base. Tap a building to build or upgrade it (crys
 | Hangar (5) | Helper drones fire more often and hit harder |
 | Workshop | Opens the Workshop (blaster, net grenade, shield upgrades) |
 | Command center | Overview of all buildings and your base level |
-| Crew quarters | Coming soon |
+| Crew quarters (3 levels) | +10% / +20% / +30% extra crystals after every level |
 
 Built buildings glow gold, brighter with each level; unbuilt ones show a +. Costs are in `MODULES` in `js/app.js`.
 
@@ -158,7 +153,7 @@ The free Spark plan is enough to start (50,000 monthly active users, 50,000 read
 
 ### Licences
 
-In `js/config.js`, `licensing.enabled: false` keeps the whole game open (as now). With `enabled: true`, players without a licence can only play the worlds in `freeWorlds` (Crystal Shores and Skyline Run by default); the other world cards show **Full game** and lead to the Account screen.
+In `js/config.js`, `licensing.enabled: false` keeps the whole game open (as now). With `enabled: true`, players without a licence can only play the worlds in `freeWorlds` (Crystal Shores by default); the other world cards show **Full game** and lead to the Account screen.
 
 A licence is a document in Firestore → collection `licenses` → document named after the player's **Account ID** (shown on the Account screen) with a field `full` = true (for ever) or `until` = a date (for example a school year). You can add one by hand in the Firebase console (for testers, schools, giveaways). Later a payment service (Paddle, Lemon Squeezy or Stripe) will do this automatically after a payment: set `licensing.buyUrl` to the payment page (it receives `?account=…&email=…`), and a small Firebase Cloud Function (needs the pay-as-you-go Blaze plan) receives the payment message and writes the licence.
 
@@ -169,9 +164,55 @@ Options has four settings for slower devices:
 - **Graphics:** Sharp 1920×1080 (with glow effects), Fast 1280×720, Low 960×540, Very low 640×360. Auto starts at Fast and steps down below 45 FPS.
 - **Frame rate:** 60, or **30 (steady)**: the game then draws exactly every other screen refresh. On a 60 Hz TV, a steady 30 often feels smoother than an uneven 45.
 - **Effects:** Full or **Reduced** (few sparkles, no screen shake, no bubbles, no moving glows and shadows over the game).
+- **Unlock all** (Options) gives everything for testing (also every creature in the alien guide): all worlds and levels, all Workshop upgrades (incl. Armour suit Mk5), every crystal-shop item at its highest level and every star-shop item (both drones), all trophies, all abilities at level 3, all superpowers, every base building at its highest level (Med bay, Crew quarters, Hangar, Lab, Alien sanctuary, Observatory) and lots of crystals and materials. Switching it off brings back your real progress.
 - **Show speed (FPS):** shows frames per second and a speed test: *logic* and *draw* are the milliseconds the game itself spends per frame, *slow* is the share of frames that came too late, *worst* the longest wait between two frames. If logic + draw are small (a few ms) but the FPS is still low, the TV's graphics chip or browser is the limit, not the game code.
 
 The game also makes shrunk copies (60% and 35%) of the spritesheets once, and draws from the smallest copy that is still big enough; that saves weak devices a lot of work every frame without looking different.
+
+## Shop levels
+
+Three crystal-shop items can now be upgraded several times:
+
+- **Bigger magazine** (8 levels): 8 → 12 → 18 → 24 → 30 → 36 → 42 → 48 → 50 shots.
+- **Quick reload** (3 levels): half the reload time, then 20% less, then another 20% less (0.95 s → 0.48 → 0.38 → 0.30 s).
+- **Steady aim** (3 levels): stronger aim help (+12% / +22% / +32%), and from level 2 a bigger hit area (+10% / +20%), which also works with aim help switched off.
+
+## Armour suit (health)
+
+A fourth Workshop upgrade: the **Armour suit** (Mk1–Mk5) raises your health from 100 up to 300 (+200%, three times as much). The health number in the HUD shows the real value; the bar still shows how full it is.
+
+## Story cutscenes
+
+`js/story.js` plays the story scenes: a picture with effects (`assets/story/`), and a modern dialogue box with a round portrait of whoever speaks (name in their colour; narration in italics without a portrait). Tap/click, Enter, Space or Fire shows the rest of a line at once, or goes to the next; **Skip** (or Escape) ends the scene.
+
+- **After King Nebula** (every time he is beaten; Skip ends it straight away): he calms down, Orbit's scanner beam finds the glowing **Mark of Static** on his crown, the strange "new stars" glitch in the sky, and he hands over a purple crystal. Reward card: King Nebula becomes your **Champion**, a golden **statue** appears on your home base (Spacedome), and Nebula aliens move into your habitat. Then the usual end screen follows.
+- **After the Ember Lord** (ruler of the crystal fire world **Sunfire Dunes**; the Prism Empress now rules Glowwood Forest): he crashes down in sparks, the Mark of Static fades from his chest under Orbit's scanner, a falling star streaks across the sky, and he tosses over a **Scorched Fragment** of metal. Reward: he becomes your Champion with a statue in the Spacedome, Ember aliens move into your habitat, and the fragment appears in the **Collection** in the Command center. His fights use his own artwork (`assets/ember_lord.png`, 5×3 frames: front, moving sideways, wind-up, spin attack, hurt).
+- **Orbit**, the AI helper in the astronaut's helmet, has 9 designs (`assets/story/orbit.jpg`); players choose one in **Options → Orbit**.
+
+New scenes are added to `SCENES` in `js/story.js`: a picture, a few positions on it (helmet, crown, boss), and the lines with their effects.
+
+## Superpowers
+
+A **super meter** fills while you play: every catch adds to it (more with a combo), and so does 10 seconds without getting hit. When it's full, the **Super button** glows: the round button under the health bar (click it or press **E**), the ★ SUPER button on the phone controller, or the star button above the d-pad in touch mode. Using it empties the meter.
+
+Choose your superpowers in **Workshop → Abilities → Superpowers**: one in your **left hand** and one in your **right hand** (4 big cards per page). Both hands share the same meter: when it is full, use either one — left with **Q** / ★ Left, right with **E** / ★ Right (two round buttons under the health meter; two star buttons on the touch gamepad and the phone controller).
+
+| Superpower | Effect | Unlocked by |
+|---|---|---|
+| Shockwave | All aliens are blasted far back; every flying rock is smashed | from the start |
+| Star Barrier | 8 seconds: nothing gets through (rocks, fire walls, beams, reflected shots) | beating King Nebula |
+| Mind Swirl | 8 seconds: aliens get dizzy, stop attacking and catch each other | beating the Ember Lord |
+| Black Hole | A black hole pulls all aliens into one spot; one shot at the bunch catches them all | beating the Tidequeen |
+| Frost Nova | 5 seconds: every alien freezes and is caught with one hit (even armoured ones); a boss is only slowed down | beating the Prism Empress |
+| Overdrive | 6 seconds: the blaster fires by itself at whatever is under the circle, no reloading, double damage | beating the Echo Monarch |
+| Meteor Shower | 5 seconds of crystal meteors that catch aliens where they land (and hit a boss a little) | beating the Vortex King |
+| Healing Aurora | 40% health back at once, then a slow heal for 10 seconds | collecting 60 stars |
+
+Icons are in `assets/supers.png` (8 icons side by side); settings in `SUPERS` in `js/level.js` and `SUPER_INFO` in `js/app.js`.
+
+## HUD
+
+The health meter is a slim glowing bar with the number above it (for example 220/300); a white trail shows what you just lost, and it turns red and the heart beats below 30%. On the level-clear screen, drops are shown as icons with the amount underneath.
 
 ## Region abilities
 
@@ -222,9 +263,21 @@ Amazon Fire TV does not support Google Cast; for Fire TV the route is an app in 
 
 ## Planet choice
 
-After Start and the intro, the **Choose your planet** screen appears on the space background (`assets/space.jpg`). Planets spin slowly (their 12 frames blend into each other, with a gentle sway): **Novara** (`assets/planet1.png`) holds all current worlds and shows "6 worlds · 13 aliens · 6 bosses" and its stars; **Cindera** (`assets/planet2.png`) can be visited: its world screen shows its first three worlds, Glimmer Coast (`assets/cindera1.jpg`) Emberfall Rift (`assets/cindera2.jpg`) and Thunder Spires (`assets/cindera3.jpg`), as *Soon available* (no aliens yet). **Prismara** (`assets/planet3.png`) is shown as *Coming soon*. After the intro the screen fades through dark into the planets (the intro's sound fades out too), and choosing a planet zooms into it and fades via its glow into the worlds, which come into focus with the cards rising one after another. Tapping anywhere during the intro skips it. Planets are listed in `PLANETS` in `js/app.js`.
+After Start and the intro, the **Choose your planet** screen appears on the space background (`assets/space.jpg`). Planets spin slowly (their 12 frames blend into each other, with a gentle sway): **Novara** (`assets/planet1.png`) holds all current worlds and shows "6 worlds · 13 aliens · 6 bosses" and its stars; **Cindera** (`assets/planet2.png`) can be visited: its world screen shows its first three worlds, Glimmer Coast (`assets/cindera1.jpg`) Emberfall Rift (`assets/cindera2.jpg`) and Thunder Spires (`assets/cindera3.jpg`), as *Soon available* (no aliens yet). **Prismara** (`assets/planet3.png`) and **Tetra** (`assets/planet4.png`, 16 frames) are shown as *Coming soon*. The planets sit on a **carousel**: three in view (the chosen one large in the middle), turned with the ‹ › arrows, by swiping, with the left/right keys, or by tapping a planet at the side. After the intro the screen fades through dark into the planets (the intro's sound fades out too), and choosing a planet zooms into it and fades via its glow into the worlds, which come into focus with the cards rising one after another. Tapping anywhere during the intro skips it. Planets are listed in `PLANETS` in `js/app.js`.
 
 The buttons on this screen: **Back** (title screen), **Home** (base), **Continue** (straight to the next level to play, with its world and number shown on the button), **Goals**, **Shop** and **Options**. Choosing Novara zooms into it and opens the world screen (which keeps Workshop, Alien guide and Connect phone).
+
+## Planet Cindera: Glimmer Coast
+
+Cindera's first world, **Glimmer Coast** (world 10, `assets/cindera1.jpg`), has ten levels with the **Lavaclaw** (`assets/lavaclaw.png`, 5×3 frames). The Lavaclaw cannot fly: it walks over the ground toward you with a heavy stomping step, raises rocks before it throws them, and swipes with its tail when it reaches you. Level 10 is the **Lavaclaw Titan**: it stands on the ground, roars when its phase changes, sends lava waves in phase 2 (shield up!) and gets furious in phase 3. Glimmer Coast opens after Starfall Wetlands (the last world of Novara). Emberfall Rift and Thunder Spires stay *Soon available*.
+
+The **alien guide** has a page per planet; the Cindera page has 20 creatures (card images in `assets/dex/`, cut from the Cindera roster). The Lavaclaw can already be caught; the others come with the next worlds.
+
+## Gamepad and mouse
+
+- **Sticky aim with a gamepad** (phone gamepad and touch gamepad): near an alien, rock or boss part the aiming circle locks onto it like a magnet and stays on it while it moves, until you steer clearly away; the hit area is also bigger.
+- **Rotating crystals and weak spots** (Prism Empress, King Nebula) turn **half as fast** when someone plays with a gamepad.
+- **Web version: switch any time.** While playing with the mouse, using the phone gamepad switches to it; moving or clicking the mouse switches back.
 
 ## Expand mode (wide screens)
 
@@ -232,7 +285,7 @@ The game is always 1080 units high, and as wide as the screen's shape: 1920 on a
 
 ## Touch mode (on-screen gamepad)
 
-In the Android app (and in a browser with `?touch=1` after the address) the game has its own gamepad on the screen, so no phone controller, no QR code and one player: a d-pad on the left moves the aiming circle, the big **FIRE** button on the right shoots, and the small buttons around it switch to the blaster, net grenade, time grenade (once bought) and shield, and reload. In the extra platformer level the big button jumps, and the small ones blast and run. Menus work by tapping. **Options → Touch buttons** lets you drag every button to another place (Reset puts them back).
+In the Android app (and in a browser with `?touch=1` after the address) the game has its own gamepad on the screen, so no phone controller, no QR code and one player: a d-pad on the left moves the aiming circle, the big **FIRE** button on the right shoots, and the small buttons around it switch to the blaster, net grenade, time grenade (once bought) and shield, and reload. Menus work by tapping. **Options → Touch buttons** lets you drag every button to another place (Reset puts them back).
 
 ## Android app (APK)
 
