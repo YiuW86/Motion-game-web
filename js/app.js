@@ -50,9 +50,13 @@
   }
 
   const SHOP = [
-    { id: 'magazine',    name: 'Bigger magazine',  text: '12 shots before reloading instead of 8.', price: 25 },
-    { id: 'quickReload', name: 'Quick reload',     text: 'Reloading takes half the time.', price: 30 },
-    { id: 'steadyAim',   name: 'Steady aim',       text: 'Stronger aim assist when it is switched on.', price: 35 },
+    // items with `levels` can be upgraded again and again (save.shopLv); `effect(l)` describes level l
+    { id: 'magazine',    name: 'Bigger magazine',  text: 'More shots before you have to reload.',
+      levels: [25, 40, 60, 80, 110, 140, 180, 220], effect: (l) => `${[8, 12, 18, 24, 30, 36, 42, 48, 50][l]} ${t('shots')}` },
+    { id: 'quickReload', name: 'Quick reload',     text: 'Reloading goes faster.',
+      levels: [30, 60, 100], effect: (l) => `${t('Reload time')} ${[0.95, 0.48, 0.38, 0.3][l].toFixed(2)} s` },
+    { id: 'steadyAim',   name: 'Steady aim',       text: 'Your aim is steadier and more precise: aliens are easier to hit.',
+      levels: [35, 70, 120], effect: (l) => `${t('Aim help')} +${[0, 12, 22, 32][l]}% · ${t('hit area')} +${[0, 0, 10, 20][l]}%` },
     { id: 'medkit',      name: 'Emergency medkit', text: 'Heals 30% once per level when health drops to 30%.', price: 40 },
     { id: 'grenadePouch', name: 'Grenade pouch',   text: 'Start each level with 5 net grenades instead of 3.', price: 30 },
     { id: 'timeGrenade', name: 'Time grenades',    text: '2 time grenades per level. Everything slows down for 3 seconds.', price: 45 },
@@ -207,10 +211,45 @@
   const worldCleared = (w) => Array.from({ length: STAGES }, (_, i) => i + 1).every((s) => stageCleared(w, s));
   // Options → "Unlock all levels" opens everything (handy for testing or for younger players)
   const unlockAll = () => save.options.unlockAll === 'on';
+  // "Unlock all" (Options): every upgrade, shop item, drone, trophy, ability, superpower and building,
+  // plenty of crystals and materials. The real progress is kept aside and comes back when it is switched off.
+  const UNLOCK_KEYS = ['upg', 'owned', 'trophies', 'mods', 'base', 'mats', 'crystals', 'loadout', 'shopLv', 'dex'];
+  function applyUnlockAll(on) {
+    if (on && !save.unlockBackup) save.unlockBackup = JSON.parse(JSON.stringify(UNLOCK_KEYS.reduce((o, k) => { o[k] = save[k]; return o; }, {})));
+    if (on) {
+      save.upg = { blaster: 5, net: 3, shield: 3, health: 5 };
+      save.owned = Object.assign({}, save.owned);
+      [...SHOP, ...STAR_SHOP].forEach((it) => { save.owned[it.id] = true; });
+      save.shopLv = {}; SHOP.forEach((it) => { if (it.levels) save.shopLv[it.id] = it.levels.length; });
+      save.trophies = { nebulaCrown: 1, emberCore: 1, tidePearl: 1, prismHeart: 1, echoBell: 1, vortexEye: 1 };
+      save.mods = {}; MODS.forEach((m) => { save.mods[m.id] = 3; });
+      save.loadout = { weapon: save.loadout && save.loadout.weapon || 'bubble', drone: save.loadout && save.loadout.drone || 'mirror' };
+      save.base = Object.assign({}, save.base);
+      MODULES.forEach((m) => { if (m.max) save.base[m.id] = m.max; });
+      if (!save.base.sanctT) save.base.sanctT = Date.now();
+      save.mats = { shard: 999, goo: 999, dust: 999, mist: 999, spark: 999, pearl: 999, glass: 999, echo: 999, vdust: 999 };
+      save.crystals = Math.max(save.crystals, 99999);
+      save.dex = Object.assign({}, save.dex);
+      Dex.ALIENS.forEach((a) => { if (!save.dex[a.id]) save.dex[a.id] = 1; });     // every creature in the alien guide
+    } else if (!on && save.unlockBackup) {
+      UNLOCK_KEYS.forEach((k) => { if (save.unlockBackup[k] !== undefined) save[k] = save.unlockBackup[k]; else delete save[k]; });
+      delete save.unlockBackup;
+      // anything that was not there before goes back to its starting value
+      if (!save.upg) save.upg = { blaster: 1, net: 1, shield: 1 };
+      if (!save.owned) save.owned = {};
+      if (!save.trophies) save.trophies = {};
+      if (!save.mods) save.mods = {};
+      if (!save.base) save.base = {};
+      if (!save.loadout) save.loadout = {};
+      if (!save.mats) save.mats = { shard: 0, goo: 0, dust: 0 };
+      if (save.crystals == null) save.crystals = 0;
+    }
+    persist();
+  }
   // Endless opens after the first world is cleared
   const needsLicence = (w) => !isFreeWorld(w) && !hasFullGame();
   const worldUnlocked = (w) => !needsLicence(w) && (unlockAll() || w === WORLD_IDS[0] || !!LEVELS[w].experimental
-    || (LEVELS[w].endless ? worldCleared(1) : worldCleared(w - 1)));
+    || (LEVELS[w].endless ? worldCleared(1) : w === 10 ? worldCleared(6) : worldCleared(w - 1)));
   const stageUnlocked = (w, s) => unlockAll() || (worldUnlocked(w) && (s === 1 || stageCleared(w, s - 1)));
   const worldStars = (w) => Array.from({ length: STAGES }, (_, i) => stageStars(w, i + 1)).reduce((a, b) => a + b, 0);
   function nextStage(w, s) {
@@ -227,20 +266,25 @@
   const CROWN_SVG = '<svg class="boss-crown" viewBox="0 0 64 40"><path d="M4 36V10l14 12L32 4l14 18 14-12v26z" fill="#ffd27a" stroke="#fff4c9" stroke-width="2.5" stroke-linejoin="round"/></svg>';
 
   let currentPlanet = 1;
+  setTimeout(() => $('#worlds').addEventListener('scroll', () => updateWorldArrows(), { passive: true }), 0);
   function renderLevels() {
+    setTimeout(updateWorldArrows, 50);
+    $('#worlds').scrollLeft = 0;
     const box = $('#worlds');
     box.innerHTML = '';
     const planet = PLANETS.find((p) => p.id === currentPlanet);
     // the world screen shows the chosen planet's own scenery
     const bgImg = $('#screen-levels > img.fill');
     bgImg.src = planet && planet.worlds ? planet.worlds[planet.worlds.length - 1].bg : 'assets/level1.jpg';
-    $('#screen-levels').classList.toggle('planet-soon', !!(planet && planet.worlds));
+    const playable = planet && planet.worlds ? planet.worlds.filter((wd) => wd.world).map((wd) => wd.world) : [];
+    $('#screen-levels').classList.toggle('planet-soon', !!(planet && planet.worlds) && !playable.length);
     if (planet && planet.worlds) {
-      // a planet whose worlds are not ready yet: show them, locked, as "soon available"
-      planet.worlds.forEach((wd, i) => {
+      // this planet's playable worlds as normal cards, then the ones that are not ready yet ("soon available")
+      playable.forEach((w) => box.appendChild(worldCard(w)));
+      planet.worlds.filter((wd) => !wd.world).forEach((wd, i) => {
         const b = document.createElement('button');
         b.className = 'level-card locked soon-card';
-        b.style.setProperty('--i', i);
+        b.style.setProperty('--i', i + playable.length);
         b.innerHTML = `<div class="face"><img src="${wd.bg}" alt="">${LOCK_SVG}<div class="label"><b>${t(wd.name)}</b><small class="needs-lic">${t('Soon available')}</small></div></div>`;
         b.addEventListener('click', () => { Sfx.clink(); showToast(t('Soon available')); });
         box.appendChild(b);
@@ -248,7 +292,12 @@
       updatePhoneUi();
       return;
     }
-    for (const w of WORLD_IDS) {
+    for (const w of WORLD_IDS) if ((LEVELS[w].planet || 1) === 1) box.appendChild(worldCard(w));
+    updatePhoneUi();
+  }
+  function worldCard(w) {
+    {
+      const box = { children: { length: 0 } };
       const cfg = LEVELS[w];
       const open = worldUnlocked(w);
       const lic = needsLicence(w);        // needs the full game (licence)
@@ -263,7 +312,7 @@
       const sub = lic ? `<small class="needs-lic">${t('Full game')}</small>`
         : cfg.endless ? (open ? `<small>${t('Best')}: ${t('wave')} ${eb.wave || 0}</small><span class="card-stars">${(eb.score || 0).toLocaleString()}</span>` : `<small>Clear ${LEVELS[1].name} first</small>`)
         : cfg.experimental && open ? `<small>Extra level</small><span class="card-stars">${starSvg(true)} ${worldStars(w)}/${maxStars}</span>`
-        : open ? `<span class="card-stars">${starSvg(true)} ${worldStars(w)}/${maxStars}</span>` : `<small>Clear ${LEVELS[w - 1].name} first</small>`;
+        : open ? `<span class="card-stars">${starSvg(true)} ${worldStars(w)}/${maxStars}</span>` : `<small>Clear ${LEVELS[w === 10 ? 6 : w - 1].name} first</small>`;
       b.innerHTML = `<div class="face"><img src="${cfg.bg}" alt="">${open ? '' : LOCK_SVG}<div class="label"><b>${cfg.name}</b>${sub}</div></div>`;
       b.setAttribute('aria-label', open ? `${cfg.name}, ${worldStars(w)} of ${STAGES * 3} stars` : `${cfg.name}, locked`);
       // the experimental platformer is a single level: start it right away
@@ -272,9 +321,8 @@
         if (!worldUnlocked(w)) return;
         Sfx.select(); if (cfg.plat || cfg.endless) chooseStage(w, 1); else openWorld(w);
       });
-      box.appendChild(b);
+      return b;
     }
-    updatePhoneUi();
   }
 
   // Opening a world: its background zooms in and the 5 levels pop out of the centre along a dotted path
@@ -395,6 +443,9 @@
     { id: 'net', name: 'Net grenade', max: 3,
       stats: (l) => `${t('Net size')} +${(l - 1) * 15}% · ${t('Damage')} ${2 + l}`,
       cost: [null, { crystal: 50, shard: 6, goo: 2 }, { crystal: 120, shard: 12, goo: 6, dust: 2 }] },
+    { id: 'health', name: 'Armour suit', max: 5,
+      stats: (l) => `${t('Health')} ${100 + 50 * (l - 1)} (+${50 * (l - 1)}%)`,
+      cost: [null, { crystal: 60, shard: 8 }, { crystal: 140, shard: 14, goo: 4 }, { crystal: 240, shard: 20, goo: 8, dust: 2 }, { crystal: 380, shard: 28, goo: 12, dust: 5, trophy: 'emberCore' }] },
     { id: 'shield', name: 'Shield', max: 3,
       stats: (l) => `${t('Blocks')} ${10 + 4 * (l - 1)} ${t('hits')}`,
       cost: [null, { crystal: 50, shard: 8, goo: 2 }, { crystal: 120, shard: 14, goo: 5, dust: 3 }] },
@@ -411,7 +462,7 @@
   function renderWorkshop() {
     if (!save.upg) save.upg = { blaster: 1, net: 1, shield: 1 };
     const inv = [['crystal', save.crystals, 'Crystals'], ...['shard', 'goo', 'dust'].map((k) => [k, save.mats[k] || 0, MAT_NAMES[k]]),
-      ...Object.values(window.SV.REGION_MAT).filter((k) => save.mats[k] > 0).map((k) => [k, save.mats[k], MAT_NAMES[k]])];
+      ...[...new Set(Object.values(window.SV.REGION_MAT))].filter((k) => save.mats[k] > 0).map((k) => [k, save.mats[k], MAT_NAMES[k]])];
     const trophies = Object.entries(save.trophies || {}).filter(([, n]) => n > 0);
     $('#inventory').innerHTML = inv.map(([k, n, name]) => `<span class="inv">${MAT_SVG[k]}<b>${n}</b><small>${t(name)}</small></span>`).join('')
       + (trophies.length ? trophies.map(([id]) => `<span class="inv trophy">${MAT_SVG.trophy}<small>${t(TROPHY_NAMES[id] || id)}</small></span>`).join('')
@@ -642,7 +693,10 @@
       cost: [{ crystal: 100, shard: 10, goo: 2 }, { crystal: 170, shard: 14, goo: 5 }, { crystal: 250, shard: 18, goo: 8, dust: 2 }, { crystal: 350, shard: 24, goo: 11, dust: 4 }, { crystal: 480, shard: 30, goo: 15, dust: 6, trophy: 'vortexEye' }] },
     { id: 'workshop', name: 'Workshop', pos: [588, 900], open: 'workshop', desc: 'Upgrade your blaster, net grenade and shield.' },
     { id: 'command', name: 'Command center', pos: [875, 550], command: true, desc: 'The heart of your base.' },
-    { id: 'quarters', name: 'Crew quarters', pos: [219, 638], soon: true, desc: 'Coming soon.' },
+    { id: 'quarters', name: 'Crew quarters', pos: [219, 638], max: 3,
+      desc: 'Your crew helps collecting: you get extra crystals after every level.',
+      effect: (l) => `+${l * 10}% ${t('crystals per level')}`,
+      cost: [{ crystal: 90, shard: 8 }, { crystal: 180, shard: 14, goo: 5 }, { crystal: 320, shard: 22, goo: 10, dust: 3 }] },
   ];
   const baseLevel = () => MODULES.filter((m) => m.max).reduce((a, m) => a + (save.base[m.id] || 0), 0);
 
@@ -652,6 +706,15 @@
     $('#home-inv').innerHTML = inv.map(([k, n]) => `<span class="inv">${MAT_SVG[k]}<b>${n}</b></span>`).join('');
     const box = $('#buildings');
     box.innerHTML = '';
+    // statues of your Champions
+    for (const [id, ch] of Object.entries(CHAMPIONS)) {
+      if (!(save.champions || {})[id]) continue;
+      const st = document.createElement('div');
+      st.className = 'statue';
+      st.style.left = ch.pos[0] + 'px'; st.style.top = ch.pos[1] + 'px';
+      st.innerHTML = `<i style="background-image:url(${ch.img})"></i><span>${t('Champion')}: ${t(ch.name)}</span>`;
+      box.appendChild(st);
+    }
     for (const m of MODULES) {
       const l = save.base[m.id] || 0;
       const b = document.createElement('button');
@@ -677,6 +740,10 @@
         const ql = save.base[q.id] || 0;
         return `<span>${t(q.name)}</span><b>${ql ? `${t('Level')} ${ql}/${q.max}` : t('Not built yet')}</b>`;
       }).join('') + `</div><p>${t('Base level')} <b>${baseLevel()}</b></p>`;
+      const items = Object.keys(save.items || {}).filter((k) => ITEMS[k]);
+      html += `<h3 class="coll-title">${t('Collection')}</h3>` + (items.length
+        ? `<div class="collection">${items.map((k) => `<div class="coll-item"><i>${window.Story ? Story.FRAGMENT_SVG : ''}</i><div><b>${t(ITEMS[k].name)}</b><p class="muted small">${t(ITEMS[k].desc)}</p></div></div>`).join('')}</div>`
+        : `<p class="muted small">${t('Nothing yet. Rulers you free may give you something to keep here.')}</p>`);
     } else if (m.max) {
       const maxed = l >= m.max, cost = maxed ? null : m.cost[l];
       const pips = Array.from({ length: m.max }, (_, i) => `<i class="${i < l ? 'on' : ''}"></i>`).join('');
@@ -894,6 +961,95 @@
     window.Cloud.init({ getLocal: () => save, useCloud: (data) => replaceSave(data), ask: askSaveChoice });
   }
 
+  // ---------------- Superpowers: choosing one ----------------
+  // Shockwave from the start; the others are earned by beating bosses (the rest come later).
+  const SUPER_INFO = [
+    { id: 'shockwave', desc: 'A huge ring blasts all aliens far back and smashes every flying rock.' },
+    { id: 'barrier', desc: 'A glowing dome for 8 seconds: nothing gets through, not even fire walls or beams.', trophy: 'nebulaCrown' },
+    { id: 'mindswirl', desc: 'For 8 seconds the aliens get dizzy and bump into each other, catching one another.', trophy: 'emberCore' },
+    { id: 'blackhole', desc: 'A black hole pulls all aliens into one spot: one tap catches the whole bunch.', trophy: 'tidePearl' },
+    { id: 'frost', desc: 'Every alien freezes for 5 seconds; frozen aliens are caught with one hit.', trophy: 'prismHeart' },
+    { id: 'overdrive', desc: 'Rapid fire for 6 seconds: no reloading, double damage.', trophy: 'echoBell' },
+    { id: 'meteor', desc: 'Crystal meteors rain from the sky and catch aliens all over the screen.', trophy: 'vortexEye' },
+    { id: 'aurora', desc: 'A healing light: 40% health back, and a slow heal for a while.', stars: 60 },
+  ];
+  const superIcon = (id, cls = '') => `<i class="super-ico ${cls}" style="--si:${window.SV.SUPERS[id].i}"></i>`;
+  const starsTotal = () => Object.values(save.stages || {}).reduce((a, x) => a + (x.stars || 0), 0);
+  const superUnlocked = (s) => !s.soon && (unlockAll() || ((!s.trophy || (save.trophies || {})[s.trophy] > 0) && (!s.stars || starsTotal() >= s.stars)));
+
+  // Superpowers: 4 big cards per page; one superpower in each hand (left and right)
+  let superPage = 0;
+  const SUPERS_PER_PAGE = 4;
+  const superPicks = () => {
+    const p = save.superPicks || [save.superPick || 'shockwave', null];
+    return [p[0] || null, p[1] || null];
+  };
+  function equipSuper(id, hand) {
+    const p = superPicks();
+    if (p[hand] === id) p[hand] = null;            // tap again to take it off
+    else { if (p[1 - hand] === id) p[1 - hand] = p[hand]; p[hand] = id; }   // already in the other hand: swap
+    if (!p[0] && !p[1]) p[hand] = id;              // always keep at least one
+    save.superPicks = p; delete save.superPick;
+    persist(); Sfx.select(); renderMods(); focusFirst();
+  }
+  function renderSupers(grid) {
+    const picks = superPicks();
+    const pages = Math.ceil(SUPER_INFO.length / SUPERS_PER_PAGE);
+    superPage = Math.min(superPage, pages - 1);
+    for (const s of SUPER_INFO.slice(superPage * SUPERS_PER_PAGE, (superPage + 1) * SUPERS_PER_PAGE)) {
+      const def = window.SV.SUPERS[s.id], open = superUnlocked(s);
+      const hand = picks.indexOf(s.id);
+      const card = document.createElement('div');
+      card.className = 'mod super-card' + (open ? '' : ' locked') + (hand >= 0 ? ' equipped' : '');
+      const why = s.soon ? t('Coming soon') : !open && s.stars ? t('Collect {a} stars to unlock').replace('{a}', s.stars) + ` (${starsTotal()}/${s.stars})` : !open ? t('Beat the {a} to unlock').replace('{a}', LEVELS[Object.keys(TROPHY_WORLD).find((w) => TROPHY_WORLD[w] === s.trophy)].boss.name) : '';
+      card.innerHTML = `${superIcon(s.id, 'big')}<div class="super-txt"><b>${t(def.name)}</b>
+        <p>${t(s.desc)}</p>${why ? `<p class="lock">${why}</p>` : ''}</div>`;
+      if (open) {
+        const row = document.createElement('div');
+        row.className = 'row hands';
+        [[0, 'Left hand'], [1, 'Right hand']].forEach(([h, label]) => {
+          const on = picks[h] === s.id;
+          const b = document.createElement('button');
+          b.className = 'btn small ' + (on ? 'equip-on' : 'equip-off');
+          b.innerHTML = `<span>${on ? '✓ ' : ''}${t(label)}</span>`;
+          b.addEventListener('click', () => equipSuper(s.id, h));
+          row.appendChild(b);
+        });
+        card.querySelector('.super-txt').appendChild(row);
+      }
+      grid.appendChild(card);
+    }
+    // page buttons
+    const nav = document.createElement('div');
+    nav.className = 'super-nav';
+    nav.innerHTML = `<button class="carousel-arrow" data-sp="-1" ${superPage === 0 ? 'disabled' : ''}>‹</button>
+      <span>${superPage + 1} / ${pages}</span>
+      <button class="carousel-arrow" data-sp="1" ${superPage >= pages - 1 ? 'disabled' : ''}>›</button>
+      <span class="hands-now">${t('Left hand')}: <b>${picks[0] ? t(window.SV.SUPERS[picks[0]].name) : '–'}</b> · ${t('Right hand')}: <b>${picks[1] ? t(window.SV.SUPERS[picks[1]].name) : '–'}</b></span>`;
+    nav.querySelectorAll('[data-sp]').forEach((b) => b.addEventListener('click', () => { superPage += Number(b.dataset.sp); Sfx.select(); renderMods(); focusFirst(); }));
+    grid.appendChild(nav);
+  }
+  const TROPHY_WORLD = { 1: 'nebulaCrown', 2: 'prismHeart', 3: 'tidePearl', 4: 'emberCore', 5: 'echoBell', 6: 'vortexEye' };   // boss of each world
+  actions['mods-super'] = () => { modsTab = 'super'; renderMods(); };
+
+  // the Super button in the game (and on the phone controller): fills up, glows when ready
+  function updateSuperHud(v) {
+    const ids = v.ids || [v.id || 'shockwave', null];
+    const paint = (el, id) => {
+      if (!el) return;
+      el.classList.toggle('hidden', !!v.none || !id);
+      el.classList.toggle('ready', !!v.ready);
+      el.style.setProperty('--p', Math.round((v.p || 0) * 100));
+      if (id && el.dataset.sid !== id) { el.innerHTML = superIcon(id) + `<span class="super-ring"></span>`; el.dataset.sid = id; }
+    };
+    // HUD buttons (left hand, right hand) and the touch gamepad
+    paint($('#super-btn'), ids[0]); paint($('#super-btn2'), ids[1]);
+    if (window.Touch && Touch.items) { paint(Touch.items.super, ids[0]); paint(Touch.items.super2, ids[1]); }
+    [1, 2].forEach((pl) => { try { Net.sendTo(pl, { m: 'super', p: v.p || 0, r: !!v.ready, none: !!v.none, h: [!!ids[0], !!ids[1]] }); } catch (e) { /* no phone */ } });
+  }
+  actions['super'] = () => Level.activateSuper(0);
+  actions['super2'] = () => Level.activateSuper(1);
+
   // ---------------- Region abilities: weapon mods and drone abilities ----------------
   // Each world: one drone ability and one weapon mod, made with that world's material and its boss trophy.
   const REGION_BY_WORLD = window.SV.REGION_MAT;
@@ -923,7 +1079,7 @@
     { id: 'vnet', kind: 'weapon', world: 6, name: 'Vortex net', desc: 'The net grenade pulls in aliens from much further away.',
       eff: (l) => t('Net {a}% bigger').replace('{a}', [25, 40, 60][l - 1]) },
   ];
-  const WORLD_TROPHY = { 1: 'nebulaCrown', 2: 'emberCore', 3: 'tidePearl', 4: 'prismHeart', 5: 'echoBell', 6: 'vortexEye' };
+  const WORLD_TROPHY = { 1: 'nebulaCrown', 2: 'prismHeart', 3: 'tidePearl', 4: 'emberCore', 5: 'echoBell', 6: 'vortexEye' };   // Glowwood: Prism Empress, Sunfire Dunes: Ember Lord
   function modCost(m, lvl) {       // cost of getting level `lvl` (1..3)
     const c = { crystal: [80, 150, 250][lvl - 1], [REGION_BY_WORLD[m.world]]: [6, 12, 20][lvl - 1] };
     if (lvl >= 2) c.goo = [0, 4, 8][lvl - 1];
@@ -942,14 +1098,17 @@
     if (!save.loadout) save.loadout = {};
     $('#tab-mw').classList.toggle('pink', modsTab === 'weapon');
     $('#tab-md').classList.toggle('pink', modsTab === 'drone');
+    $('#tab-ms').classList.toggle('pink', modsTab === 'super');
     const name = (id) => { const m = MODS.find((q) => q.id === id); return m ? t(m.name) : t('None'); };
     $('#loadout').innerHTML = `<span>${t('Loadout')}:</span> <b>${name(save.loadout.weapon)}</b> + <b>${name(save.loadout.drone)}</b>`;
     const hasDrone = save.owned.helperDrone || save.owned.droneTwo;
     $('#mods-note').textContent = modsTab === 'drone' && !hasDrone ? t('Needs a helper drone from the Star shop') : '';
-    const inv = Object.values(REGION_BY_WORLD).map((k) => `<span class="inv">${MAT_SVG[k]}<b>${save.mats[k] || 0}</b></span>`).join('');
+    const inv = [...new Set(Object.values(REGION_BY_WORLD))].map((k) => `<span class="inv">${MAT_SVG[k]}<b>${save.mats[k] || 0}</b><small>${t(MAT_NAMES[k])}</small></span>`).join('');
     $('#mods-inv').innerHTML = inv;
     const grid = $('#mods-grid');
     grid.innerHTML = '';
+    grid.classList.toggle('supers', modsTab === 'super');
+    if (modsTab === 'super') { $('#mods-note').textContent = ''; renderSupers(grid); return; }
     for (const m of MODS.filter((q) => q.kind === modsTab)) {
       const lvl = save.mods[m.id] || 0, maxed = lvl >= 3;
       const cost = maxed ? null : modCost(m, lvl + 1);
@@ -984,8 +1143,8 @@
       }
       if (lvl) {
         const e = document.createElement('button');
-        e.className = 'btn small';
-        e.innerHTML = `<span>${equipped ? t('Equipped') : t('Equip')}</span>`;
+        e.className = 'btn small ' + (equipped ? 'equip-on' : 'equip-off');
+        e.innerHTML = `<span>${equipped ? '✓ ' + t('Equipped') : t('Equip')}</span>`;
         e.addEventListener('click', () => {
           save.loadout[m.kind] = equipped ? null : m.id;
           persist(); Sfx.select(); renderMods(); focusFirst();
@@ -1023,6 +1182,7 @@
     grid.innerHTML = '';
     for (const item of star ? STAR_SHOP : SHOP) {
       if (item.needs && !save.owned[item.needs]) continue;     // shown once the first item is bought
+      if (item.levels) { grid.appendChild(levelItem(item)); continue; }
       const owned = !!save.owned[item.id];
       const money = star ? starsLeft() : save.crystals;
       const div = document.createElement('div');
@@ -1048,6 +1208,30 @@
     }
   }
 
+  // a shop item with several levels: shows its level, what the next level gives, and its price
+  const shopLevel = (id) => { const l = (save.shopLv || {})[id]; return l != null ? l : ((save.owned || {})[id] ? 1 : 0); };
+  function levelItem(item) {
+    const l = shopLevel(item.id), max = item.levels.length, maxed = l >= max, price = maxed ? 0 : item.levels[l];
+    const div = document.createElement('div');
+    div.className = 'item lv' + (l ? ' owned' : '');
+    const pips = Array.from({ length: max }, (_, i) => `<i class="${i < l ? 'on' : ''}"></i>`).join('');
+    div.innerHTML = `<b>${t(item.name)}</b><p>${t(item.text)}</p><div class="pips shop-pips">${pips}</div>
+      <p class="lvl">${l ? `${t('Now')}: ${item.effect(l)}` : `${t('Now')}: ${item.effect(0)}`}${maxed ? '' : ` → <b>${item.effect(l + 1)}</b>`}</p>`;
+    const btn = document.createElement('button');
+    btn.className = 'btn small' + (maxed ? '' : ' pink');
+    btn.innerHTML = `<span>${maxed ? t('Max') : `${l ? t('Upgrade') : t('Buy')} · <i class="crystal"></i> ${price}`}</span>`;
+    btn.disabled = maxed || save.crystals < price;
+    btn.addEventListener('click', () => {
+      if (maxed || save.crystals < price) return;
+      save.crystals -= price;
+      save.shopLv = { ...(save.shopLv || {}), [item.id]: l + 1 };
+      save.owned[item.id] = true;
+      persist(); Sfx.reload(); renderShop(); focusFirst();
+    });
+    div.appendChild(btn);
+    return div;
+  }
+
   // ---------------- Options ----------------
   function renderOptions() {
     const o = save.options;
@@ -1065,6 +1249,7 @@
     if (key === 'assist' || key === 'sens') v = Number(v);
     save.options[key] = v;
     if (key === 'sound') Sfx.enabled = v === 'on';
+    if (key === 'unlockAll') applyUnlockAll(v === 'on');
     if (key === 'lang') { I18N.setLang(v); [1, 2].forEach((pl) => Net.sendTo(pl, { m: 'welcome', player: pl, lang: v })); }
     persist(); renderOptions(); Sfx.select();
   }));
@@ -1121,9 +1306,7 @@
 
   // ---------------- HUD ----------------
   function buildHud() {
-    const segs = $('#health-segs');
-    segs.innerHTML = '';
-    for (let i = 0; i < 20; i++) { const c = document.createElement('i'); c.className = 'seg-cell'; segs.appendChild(c); }
+    // (the health meter needs no building any more: it is one bar)
   }
   // Catch counters for the monsters of the level being played
   function buildCatches() {
@@ -1142,10 +1325,11 @@
   let toastTimer = null;
   function onHud(kind, value, L) {
     if (kind === 'all' || kind === 'health') {
-      const on = Math.round(L.health / 5);
-      $$('#health-segs .seg-cell').forEach((c, i) => c.classList.toggle('off', i >= on));
-      $('#health-num').textContent = L.health;
+      const mult = L.healthMult || 1;
+      $('#health-num').textContent = Math.round(L.health * mult);                     // 100 … 300 with the Armour suit
+      $('#health-max').textContent = '/' + Math.round(100 * mult);
       const h = $('#health');
+      h.style.setProperty('--hp', Math.max(0, Math.min(100, L.health)) + '%');
       h.classList.toggle('low', L.health <= 30);
       if (kind === 'health') {
         h.classList.remove('hit'); void h.offsetWidth; h.classList.add('hit');
@@ -1162,6 +1346,8 @@
       if (pips.children.length !== L.magSize) {
         pips.innerHTML = '';
         for (let i = 0; i < L.magSize; i++) { const p = document.createElement('i'); p.className = 'pip'; pips.appendChild(p); }
+        pips.classList.toggle('many', L.magSize > 12);           // bigger magazines: thinner bullets, in two rows from 30
+        pips.classList.toggle('lots', L.magSize > 24);
       }
       [...pips.children].forEach((p, i) => p.classList.toggle('off', i >= P1.ammo));
     }
@@ -1211,6 +1397,7 @@
       }
     }
     if (kind === 'stat') Progress.event(value);
+    if (kind === 'super') updateSuperHud(value);
     if (kind === 'drop') {
       // materials are saved right away, so they are kept even if you leave the level
       if (value.startsWith('trophy:')) {
@@ -1266,7 +1453,7 @@
     const overlay = $$('#ov-pause.show, #ov-end.show')[0];
     if (!overlay) return [];
     const sr = stage.getBoundingClientRect();
-    const s = sr.width / 1920;
+    const s = sr.width / window.SV.viewW();            // the stage can be wider than 1920 (expand mode)
     return $$('button', overlay).filter((b) => !b.disabled).map((b) => {
       const r = b.getBoundingClientRect();
       return { el: b, x: (r.left - sr.left) / s, y: (r.top - sr.top) / s, w: r.width / s, h: r.height / s };
@@ -1278,7 +1465,7 @@
   // ---------------- Level flow ----------------
   let lastMode = 'mouse', lastWorld = 1, lastStage = 1;
   function startLevel(mode, world = lastWorld, stage = lastStage) {
-    currentPlanet = 1;
+    currentPlanet = (LEVELS[world] && LEVELS[world].planet) || 1;
     if (!stageUnlocked(world, stage)) return;
     lastMode = mode; lastWorld = world; lastStage = stage;
     $('#ov-world').classList.remove('show');
@@ -1300,8 +1487,33 @@
     else onHud('countdown', 3, Level);
   }
 
+  // story scenes after beating a ruler (by boss), what it unlocks, and where their statue stands in the Spacedome
+  const STORY_AFTER = {
+    nebula: { scene: 'kn', champ: 'nebula' },
+    ember: { scene: 'el', champ: 'ember', item: 'scorchedFragment' },
+  };
+  const CHAMPIONS = {
+    nebula: { name: 'King Nebula', img: 'assets/story/p_kingnebula.jpg', pos: [1040, 960] },
+    ember: { name: 'Ember Lord', img: 'assets/story/p_emberlord.jpg', pos: [830, 985] },
+  };
+  const ITEMS = {
+    scorchedFragment: { name: 'Scorched Fragment', desc: 'A piece of the "falling star" from the Ember Lord\'s volcano. It is metal: someone built this.' },
+  };
   function endLevel(r) {
-    const bonus = r.won ? 15 : 0;
+    // every time a ruler with a story is beaten: the cutscene (with a Skip button), then the usual end screen
+    const story = r.won && r.stage === STAGES && !r.storyShown && window.Story ? STORY_AFTER[LEVELS[r.world].boss && LEVELS[r.world].boss.sprite] : null;
+    if (story) {
+      r.storyShown = true;
+      save.story = { ...(save.story || {}), [story.scene]: true };
+      save.champions = { ...(save.champions || {}), [story.champ]: true };
+      if (story.item) save.items = { ...(save.items || {}), [story.item]: true };
+      persist();
+      Story.play(story.scene, () => endLevel(r));
+      return;
+    }
+    // Crew quarters: +10% crystals per level of the building
+    const crew = Math.round((r.earned || 0) * 0.1 * ((save.base || {}).quarters || 0));
+    const bonus = (r.won ? 15 : 0) + crew;
     save.crystals += r.earned + bonus;
     const rating = starRating(r);
     if (r.endless) {
@@ -1336,12 +1548,17 @@
       <span>${t('No damage bonus')}</span><b>${r.bonus.noDamage.toLocaleString()}</b>
       <span>${t('Accuracy bonus')}</span><b>${r.bonus.accuracy.toLocaleString()}</b>
       <span>${t('Speed bonus')}</span><b>${r.bonus.time.toLocaleString()}</b>` : '';
-    const dropText = Object.entries(r.drops || {}).map(([k, n]) => `${n}× ${t(k.startsWith('trophy:') ? (TROPHY_NAMES[k.slice(7)] || k) : MAT_NAMES[k] || k)}`).join(', ');
+    // drops: a row of icons with the amount under each one (the name shows when you point at it)
+    const dropIcons = Object.entries(r.drops || {}).map(([k, n]) => {
+      const trophy = k.startsWith('trophy:');
+      const name = t(trophy ? (TROPHY_NAMES[k.slice(7)] || k) : MAT_NAMES[k] || k);
+      return `<div class="drop-ico" title="${name}">${trophy ? MAT_SVG.trophy : MAT_SVG[k] || ''}<b>${n}</b></div>`;
+    }).join('');
     $('#end-score').innerHTML = `<span class="end-score-num">${(r.score || 0).toLocaleString()}</span>`
       + (r.newBest ? `<span class="new-best">${t('New high score!')}</span>` : '')
       + (r.bestCombo > 1 ? `<small>${t('Best combo')}: ${r.bestCombo}</small>` : '');
     $('#end-stats').innerHTML = `${bonusRows}
-      ${dropText ? `<span>${t('Drops')}</span><b>${dropText}</b>` : ''}
+      ${dropIcons ? `<div class="end-drops"><span>${t('Drops')}</span><div class="drop-icons">${dropIcons}</div></div>` : ''}
       <span>Time</span><b>${fmtTime(r.time)}${r.endless ? '' : ` <small>(target ${fmtTime(r.par)})</small>`}</b>
       ${caught}
       <span>Accuracy</span><b>${r.accuracy}%</b>
@@ -1359,10 +1576,24 @@
   // ---------------- Keyboard and TV remote ----------------
   document.addEventListener('keydown', (e) => {
     Sfx.unlock();
+    // during a cutscene: Enter / Space / → next line, Escape skips
+    if (window.Story && Story.active) {
+      if (e.key === 'Enter' || e.key === ' ' || e.key === 'ArrowRight') { e.preventDefault(); Story.advance(); }
+      else if (e.key === 'Escape') { e.preventDefault(); Story.finish(); }
+      return;
+    }
     // typing in a text field (email, password, save code): leave the keys alone, except Escape
     if (e.target && /^(INPUT|TEXTAREA)$/.test(e.target.tagName) && e.key !== 'Escape') return;
+    if (current === 'planets' && (e.key === 'ArrowLeft' || e.key === 'ArrowRight') && document.activeElement && document.activeElement.closest('#planet-row')) {
+      e.preventDefault(); rotatePlanets(e.key === 'ArrowLeft' ? -1 : 1);
+      const mid = $('#planet-row .planet[data-slot="mid"]'); if (mid) mid.focus();
+      return;
+    }
     const inGame = current === 'game' && Level.state === 'play';
     if (inGame && (e.key === 'r' || e.key === 'R')) { Level.keyReload(); return; }
+    // superpowers: Q = left hand, E = right hand
+    if (inGame && (e.key === 'q' || e.key === 'Q')) { Level.activateSuper(0); return; }
+    if (inGame && (e.key === 'e' || e.key === 'E')) { Level.activateSuper(1); return; }
     if (inGame && ['1', '2', '3', '4'].includes(e.key)) { Level.keyEquipIndex(Number(e.key) - 1); return; }
     if (inGame && (e.key === 'g' || e.key === 'G')) { Level.toggleBelt(); return; }
     if (current === 'intro' && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); endIntro(); return; }
@@ -1401,6 +1632,25 @@
   };
   if (window.SV_APP) document.body.classList.add('in-app');
 
+  // ---------------- Orbit, the AI helper ----------------
+  if (save.options.unlockAll === 'on') applyUnlockAll(true);
+  if (window.Story) Story.orbitDesign = () => Number(save.options.orbit || 0);
+  function renderOrbitPick() {
+    const grid = $('#orbit-grid');
+    const cur = Number(save.options.orbit || 0);
+    grid.innerHTML = '';
+    for (let d = 0; d < 9; d++) {
+      const b = document.createElement('button');
+      b.className = 'orbit-opt' + (d === cur ? ' on' : '');
+      b.style.backgroundPosition = `${(d % 3) * 50}% ${Math.floor(d / 3) * 50}%`;
+      b.setAttribute('aria-label', `Orbit ${d + 1}`);
+      b.addEventListener('click', () => { save.options.orbit = d; persist(); Sfx.select(); renderOrbitPick(); });
+      grid.appendChild(b);
+    }
+  }
+  actions['choose-orbit'] = () => { renderOrbitPick(); $('#ov-orbit').classList.add('show'); setTimeout(focusFirst, 30); };
+  actions['orbit-close'] = () => { $('#ov-orbit').classList.remove('show'); setTimeout(focusFirst, 30); };
+
   // ---------------- Planet choice ----------------
   // Each planet spins slowly: its 12 frames blend into each other while the picture turns a little.
   // Novara holds all current worlds; Cindera is the next planet (coming soon).
@@ -1408,12 +1658,48 @@
   const PLANETS = [
     { id: 1, name: 'Novara', img: 'assets/planet1.png', cell: 340, frames: 12, open: true },
     { id: 2, name: 'Cindera', img: 'assets/planet2.png', cell: 400, frames: 12, open: true, soon: true,
-      worlds: [{ name: 'Glimmer Coast', bg: 'assets/cindera1.jpg' }, { name: 'Emberfall Rift', bg: 'assets/cindera2.jpg' },
+      // Glimmer Coast is playable (world 10, the Lavaclaw); the others come later
+      worlds: [{ world: 10, name: 'Glimmer Coast', bg: 'assets/cindera1.jpg' }, { name: 'Emberfall Rift', bg: 'assets/cindera2.jpg' },
         { name: 'Thunder Spires', bg: 'assets/cindera3.jpg' }] },
     { id: 3, name: 'Prismara', img: 'assets/planet3.png', cell: 370, frames: 12, open: false },
+    { id: 4, name: 'Tetra', img: 'assets/planet4.png', cell: 360, frames: 16, open: false },
   ];
   PLANETS.forEach((p) => { p.image = new Image(); p.image.src = p.img; });
-  let planetLoop = 0, planetZoom = false;
+  let planetLoop = 0, planetZoom = false, planetIdx = 0;
+  // place the planets on the carousel: the chosen one in the middle, its neighbours left and right
+  function layoutCarousel() {
+    const n = PLANETS.length;
+    $$('#planet-row .planet').forEach((b, i) => {
+      let off = ((i - planetIdx) % n + n) % n;
+      if (off > n / 2) off -= n;                  // -1 = left, 0 = middle, 1 = right, others out of view
+      b.dataset.slot = off === 0 ? 'mid' : off === -1 ? 'left' : off === 1 ? 'right' : off < 0 ? 'offl' : 'offr';
+      b.tabIndex = Math.abs(off) <= 1 ? 0 : -1;
+    });
+  }
+  function rotatePlanets(dir) {
+    planetIdx = (planetIdx + dir + PLANETS.length) % PLANETS.length;
+    Sfx.select();
+    layoutCarousel();
+  }
+  // world cards: scroll by one card
+  function scrollWorlds(dir) {
+    const box = $('#worlds'), card = box.querySelector('.level-card');
+    if (!card) return;
+    box.scrollBy({ left: dir * (card.offsetWidth + 22), behavior: 'smooth' });
+    Sfx.select();
+  }
+  actions['worlds-prev'] = () => scrollWorlds(-1);
+  actions['worlds-next'] = () => scrollWorlds(1);
+  // arrows only when there are more worlds than fit
+  function updateWorldArrows() {
+    const box = $('#worlds');
+    const more = box.scrollWidth > box.clientWidth + 4;
+    $('.worlds-wrap').classList.toggle('scrolls', more);
+    $('.carousel-arrow.wl').classList.toggle('dim', box.scrollLeft <= 4);
+    $('.carousel-arrow.wr').classList.toggle('dim', box.scrollLeft + box.clientWidth >= box.scrollWidth - 4);
+  }
+  actions['planet-prev'] = () => rotatePlanets(-1);
+  actions['planet-next'] = () => rotatePlanets(1);
 
   // the next level to play: the first one not yet cleared, in order
   function nextToPlay() {
@@ -1429,7 +1715,7 @@
 
   function showPlanets() {
     const totalStars = Object.values(save.stages || {}).reduce((a, s) => a + (s.stars || 0), 0);
-    const worlds = Object.values(LEVELS).filter((l) => !l.plat && !l.endless);
+    const worlds = Object.values(LEVELS).filter((l) => !l.plat && !l.endless && (l.planet || 1) === 1);
     const aliens = new Set(worlds.flatMap((l) => l.types)).size;
     const row = $('#planet-row');
     row.innerHTML = '';
@@ -1437,8 +1723,10 @@
       const b = document.createElement('button');
       b.className = 'planet' + (p.open ? '' : ' locked') + (p.soon ? ' soon' : '');
       b.dataset.planet = p.id;
+      const playW = (p.worlds || []).filter((wd) => wd.world).map((wd) => wd.world);
       const info = p.soon
-        ? `<span class="planet-info">${(p.worlds || []).length} ${t('worlds')}</span><span class="planet-info soon">${t('Soon available')}</span>`
+        ? `<span class="planet-info">${(p.worlds || []).length} ${t('worlds')}${playW.length ? ` · ${playW.length} ${t('open')}` : ''}</span>`
+          + (playW.length ? `<span class="planet-info stars">${starSvg(true)} ${playW.reduce((a, w) => a + worldStars(w), 0)}/${playW.length * STAGES * 3}</span>` : `<span class="planet-info soon">${t('Soon available')}</span>`)
         : p.open
         ? `<span class="planet-info">${worlds.length} ${t('worlds')} · ${aliens} ${t('aliens')} · ${worlds.length} ${t('bosses')}</span>
            <span class="planet-info stars">${starSvg(true)} ${totalStars}/${worlds.length * STAGES * 3}</span>`
@@ -1446,11 +1734,27 @@
       b.innerHTML = `<canvas class="planet-canvas" width="560" height="560"></canvas><span class="planet-name">${t(p.name)}</span>${info}`;
       b.setAttribute('aria-label', p.open ? p.name : `${p.name}, ${t('Coming soon')}`);
       b.addEventListener('click', () => {
+        // a planet at the side first turns to the middle; the middle one is entered
+        if (b.dataset.slot !== 'mid') { rotatePlanets(b.dataset.slot === 'left' || b.dataset.slot === 'offl' ? -1 : 1); return; }
         if (p.open) choosePlanet(b, p);
         else { Sfx.clink(); showToast(t('Coming soon')); }
       });
       row.appendChild(b);
       p.canvas = b.querySelector('canvas');
+    }
+    layoutCarousel();
+    // swipe left/right on the planets to turn the carousel
+    if (!row.dataset.swipe) {
+      row.dataset.swipe = '1';
+      let sx = null;
+      row.addEventListener('pointerdown', (e) => { sx = e.clientX; });
+      row.addEventListener('pointerup', (e) => {
+        if (sx == null) return;
+        const dx = e.clientX - sx; sx = null;
+        const k = $('#stage').getBoundingClientRect().width / window.SV.viewW();
+        if (Math.abs(dx) > 70 * k) { e.stopPropagation(); rotatePlanets(dx < 0 ? 1 : -1); row.dataset.swiped = Date.now(); }
+      }, true);
+      row.addEventListener('click', (e) => { if (Date.now() - (row.dataset.swiped || 0) < 300) { e.stopPropagation(); e.preventDefault(); } }, true);
     }
     // Continue: straight to the next level
     const n = nextToPlay();
@@ -1574,14 +1878,14 @@
       mp.last = now;
       if (Input.hasAim) {
         const k = Math.min(1, dt * (Input.isCam() ? 14 : 40));
-        mp.pos.x += (Input.aim.x * 1920 - mp.pos.x) * k;
+        mp.pos.x += (Input.aim.x * window.SV.viewW() - mp.pos.x) * k;     // the stage can be wider than 1920
         mp.pos.y += (Input.aim.y * 1080 - mp.pos.y) * k;
       }
       const fresh = Input.hasAim && Input.poseFresh();
       const screen = $('#screen-' + current);
       const overlay = $('.overlay.show', screen);
       const root = overlay || screen;
-      const sr = stage.getBoundingClientRect(), s = sr.width / 1920;
+      const sr = stage.getBoundingClientRect(), s = sr.width / window.SV.viewW();
       const hit = $$('button', root).filter((b) => !b.disabled && b.offsetParent !== null && (overlay || !b.closest('.overlay'))).find((b) => {
         const r = b.getBoundingClientRect();
         const x = (r.left - sr.left) / s, y = (r.top - sr.top) / s;
